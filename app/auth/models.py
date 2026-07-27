@@ -2,7 +2,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import String, DateTime, ForeignKey, Table, Column, func
+from sqlalchemy import String, DateTime, ForeignKey, Table, Column, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -37,10 +37,19 @@ class Role(Base):
 
 class User(Base):
     __tablename__ = "users"
+    __table_args__ = (UniqueConstraint("tenant_id", "email", name="uq_users_tenant_email"),)
+
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenants.id"), nullable=False)
     email: Mapped[str] = mapped_column(String(255), nullable=False)
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
-    is_platform_admin: Mapped[bool] = mapped_column(default=False)  # you, the OS provider — cross-tenant access
+
+    # Cross-tenant access for you, the OS operator (support, billing, ops).
+    is_platform_admin: Mapped[bool] = mapped_column(default=False)
+    # Full access within their own tenant only, without needing individual
+    # permission rows -- set on the user who completes /auth/register for
+    # a new tenant. Distinct from is_platform_admin, which is cross-tenant.
+    is_tenant_owner: Mapped[bool] = mapped_column(default=False)
+
     roles: Mapped[list[Role]] = relationship(secondary=user_roles)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

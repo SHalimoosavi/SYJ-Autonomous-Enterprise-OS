@@ -26,7 +26,9 @@ class TenantContextMiddleware(BaseHTTPMiddleware):
             if len(parts) > 2 and not is_ip_literal:
                 tenant_id = parts[0]
 
-        if not tenant_id and not request.url.path.startswith(("/health", "/docs", "/openapi.json")):
+        if not tenant_id and not request.url.path.startswith(
+            ("/health", "/docs", "/openapi.json", "/api/v1/auth/register")
+        ):
             return JSONResponse(status_code=400, content={"detail": "Missing tenant context"})
 
         request.state.tenant_id = tenant_id
