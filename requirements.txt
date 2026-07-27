@@ -1,0 +1,60 @@
+# =============================================================================
+# Termux/Android (ARM64) dependency audit — every package below is either
+# pure-Python or installs from an official prebuilt wheel/pkg with zero
+# native compilation. See docs/TERMUX.md for the per-package rationale and
+# the packages that were deliberately REMOVED (fastapi, pydantic,
+# pydantic-settings, python-jose[cryptography], passlib[bcrypt],
+# uvicorn[standard]) because they pull in Rust/C extensions with no
+# published Android wheel.
+# =============================================================================
+
+# --- Python version ---
+# Supported: 3.11, 3.12, 3.13. Recommended: 3.12 (Termux's official `pkg
+# install python` version as of this writing). 3.14 is NOT currently
+# supported: Pydantic itself dropped Pydantic-v1 support starting with
+# Python 3.14, and although Pydantic v2/pydantic-core publishes cp314
+# wheels, those are manylinux (glibc) only -- Termux uses Bionic libc, so
+# pip would still have to build pydantic-core from source even on 3.14.
+# Since this project doesn't depend on pydantic at all anymore, the only
+# remaining reason to track a specific Python version is general ecosystem
+# maturity, hence the 3.11-3.13 range.
+
+# --- Web framework (pure Python — see app/main.py for why not FastAPI) ---
+starlette==0.47.1
+uvicorn==0.35.0
+# NOTE: install plain "uvicorn", never "uvicorn[standard]". The [standard]
+# extra pulls in uvloop and httptools (C/Cython extensions, no Android
+# wheels, and uvloop doesn't support Android's libc regardless). Plain
+# uvicorn uses asyncio's default event loop and the pure-Python h11 parser.
+
+# --- Database (pure Python on the dev path) ---
+sqlalchemy==2.0.43
+alembic==1.14.1
+aiosqlite==0.20.0          # dev DB driver, pure-Python wrapper over stdlib sqlite3
+# greenlet is required at runtime by SQLAlchemy's AsyncEngine and is a C
+# extension that reliably fails to build from source on Termux (see
+# docs/TERMUX.md). Install it via Termux's own package manager BEFORE
+# `pip install -r requirements.txt`:
+#     pkg install python-greenlet
+# pip will then find it already satisfied and skip building it.
+
+# --- Auth (pure Python — see app/core/security.py for the rationale) ---
+passlib==1.7.4              # pbkdf2_sha256 scheme only; no [bcrypt] extra
+# No python-jose. HS256 JWT signing is hand-rolled against stdlib
+# hmac/hashlib in app/core/security.py.
+
+python-multipart==0.0.20
+httpx==0.28.1
+pyyaml==6.0.2                # pure-Python fallback path when libyaml/Cython absent
+structlog==24.4.0
+pytest==8.3.4
+pytest-asyncio==0.25.2
+
+# --- Production-only (install on Linux/cloud, NOT required in Termux) ---
+# asyncpg==0.30.0          # Postgres async driver — no Android wheels, C build
+# redis==5.2.1              # Event bus / Celery broker — needs native redis-server
+# celery==5.4.0             # Background workers — run on production host only
+# fastapi==0.118.0          # Optional: layer back on top of Starlette for
+#                            # auto OpenAPI docs once deploying to a glibc
+#                            # host where pydantic-core installs as a
+#                            # prebuilt wheel with zero compilation.

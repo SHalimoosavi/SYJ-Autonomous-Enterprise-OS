@@ -1,0 +1,46 @@
+# AI Gateway routing table.
+# Format: "<department>.<task_type>" -> ordered fallback chain of [provider, model].
+# Changing provider/model assignments = edit this file only. No code changes,
+# no redeploys of agent logic. Per-tenant overrides can layer on top of this
+# (see tenant.ai_provider_overrides_encrypted) for white-label customers who
+# bring their own API keys.
+
+default_fallback_chain:
+  - provider: ollama
+    model: qwen2.5:14b
+
+departments:
+  engineering:
+    code_generation:
+      - provider: claude
+        model: claude-sonnet-4-6
+      - provider: ollama
+        model: qwencoder:latest
+    code_review:
+      - provider: claude
+        model: claude-sonnet-4-6
+      - provider: openrouter
+        model: google/gemini-2.5-pro
+
+  quality_assurance:
+    test_analysis:
+      - provider: claude
+        model: claude-sonnet-4-6
+      - provider: openrouter
+        model: google/gemini-2.5-pro
+
+  general_operations:
+    default:
+      - provider: ollama
+        model: qwen2.5:14b
+      - provider: ollama
+        model: deepseek-r1:14b
+      - provider: openrouter
+        model: meta-llama/llama-3.3-70b
+
+  executive_office:
+    briefing_synthesis:
+      - provider: claude
+        model: claude-sonnet-4-6
+      - provider: ollama
+        model: qwen2.5:14b
