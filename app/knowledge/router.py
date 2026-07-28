@@ -1,0 +1,99 @@
+"""RAG endpoints: ingest text into the tenant's knowledge base, and query
+it for relevant chunks. Wiring retrieved chunks into a department's
+generation call is in app/api/v1/departments_router.py's invoke handler
+(the `use_knowledge` flag)."""
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from starlette.routing import Route
+
+from app.ai_gateway.gateway import AllProvidersFailedError, get_gateway
+from app.audit.service import record_audit
+from app.auth.rbac import Unauthorized, get_current_user
+from app.core.database import AsyncSessionLocal, set_tenant_context
+from app.knowledge.models import KnowledgeChunk
+from app.knowledge.vector_store import top_k
+
+EMBEDDING_MODEL = "nomic-embed-text"  # must match routing.yaml's embedding_fallback_chain
+
+
+async def ingest(request: Request):
+    try:
+        user = await get_current_user(request)
+    except Unauthorized as exc:
+        return JSONResponse({"detail": str(exc)}, status_code=401)
+
+    body = await request.json() if request.headers.get("content-length", "0") != "0" else {}
+    content = (body or {}).get("content", "").strip()
+    department = (body or {}).get("department", "").strip() or "general"
+    source = (body or {}).get("source", "").strip() or "manual"
+
+    if not content:
+        return JSONResponse({"detail": "content is required"}, status_code=400)
+
+    gateway = get_gateway()
+    try:
+        embedding = await gateway.embed(content)
+    except AllProvidersFailedError as exc:
+        return JSONResponse(
+            {"detail": "No embedding provider is currently available.", "error": str(exc)}, status_code=503
+        )
+
+    async with AsyncSessionLocal() as session:
+        await set_tenant_context(session, user.tenant_id)
+        chunk = KnowledgeChunk(
+            tenant_id=user.tenant_id,
+            department=department,
+            source=source,
+            content=content,
+            embedding=embedding,
+            embedding_model=EMBEDDING_MODEL,
+        )
+        session.add(chunk)
+        await session.commit()
+        await session.refresh(chunk)
+        await record_audit(session, user.tenant_id, user.id, "knowledge.ingest", resource=chunk.id)
+
+    return JSONResponse({"id": chunk.id, "department": chunk.department}, status_code=201)
+
+
+async def query(request: Request):
+    try:
+        user = await get_current_user(request)
+    except Unauthorized as exc:
+        return JSONResponse({"detail": str(exc)}, status_code=401)
+
+    body = await request.json() if request.headers.get("content-length", "0") != "0" else {}
+    query_text = (body or {}).get("query", "").strip()
+    department = (body or {}).get("department", "").strip() or None
+    k = int((body or {}).get("k", 5))
+
+    if not query_text:
+        return JSONResponse({"detail": "query is required"}, status_code=400)
+
+    gateway = get_gateway()
+    try:
+        query_embedding = await gateway.embed(query_text)
+    except AllProvidersFailedError as exc:
+        return JSONResponse(
+            {"detail": "No embedding provider is currently available.", "error": str(exc)}, status_code=503
+        )
+
+    async with AsyncSessionLocal() as session:
+        await set_tenant_context(session, user.tenant_id)
+        results = await top_k(session, user.tenant_id, query_embedding, k=k, department=department)
+
+    return JSONResponse(
+        {
+            "results": [
+                {"id": chunk.id, "content": chunk.content, "department": chunk.department,
+                 "source": chunk.source, "score": round(score, 4)}
+                for chunk, score in results
+            ]
+        }
+    )
+
+
+routes = [
+    Route("/api/v1/knowledge/ingest", ingest, methods=["POST"]),
+    Route("/api/v1/knowledge/query", query, methods=["POST"]),
+]

@@ -32,3 +32,15 @@ class AIProvider(ABC):
 
     @abstractmethod
     async def health_check(self) -> bool: ...
+
+    async def embed(self, text: str, model: str) -> list[float]:
+        """
+        Returns a dense vector embedding for `text`. Not every provider
+        supports this the same way Anthropic/OpenRouter's chat-completion
+        APIs don't expose embeddings directly -- default raises
+        NotImplementedError so the gateway's fallback chain skips a
+        provider that doesn't support it, the same way it skips a
+        provider that's simply down. See OllamaProvider for a real
+        implementation.
+        """
+        raise NotImplementedError(f"{self.name} does not support embeddings")

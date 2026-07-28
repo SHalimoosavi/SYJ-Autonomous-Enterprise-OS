@@ -10,6 +10,8 @@ from app.tenancy.models import Tenant           # noqa: F401 — registers metad
 from app.auth.models import User, Role, Permission  # noqa: F401
 from app.audit.logger import AuditLog           # noqa: F401
 from app.approvals.models import ApprovalRequest  # noqa: F401
+from app.knowledge.models import KnowledgeChunk  # noqa: F401
+from app.workflows.models import WorkflowRun, WorkflowStepRun  # noqa: F401
 
 config = context.config
 if config.config_file_name is not None:

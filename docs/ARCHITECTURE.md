@@ -274,12 +274,69 @@ to SQLite, 39/39 tests passing, and a live `uvicorn` process handling
 the complete register → invoke-department (graceful 503) → create
 approval → decide approval → CEO briefing flow via real `curl` calls.
 
-## 15. Next (Phase 3 preview)
+## 16. Phase 3 — RAG, workflow engine, permission management (complete)
 
-RAG/vector DB abstraction (pure-Python in-memory backend for Termux dev,
-documented upgrade path to pgvector/Chroma in production), a
-Termux-compatible in-process workflow engine for multi-step department
-tasks (with Celery as the documented production swap), Role/Permission
-management endpoints, and the remaining dashboard widgets once a
-department has real business data behind it (e.g. Sales pipeline once
-the Sales department has a real CRM-like data model).
+- **RAG** (`app/knowledge/`): `KnowledgeChunk` stores embeddings as a JSON
+  float array; `vector_store.py` does cosine similarity in pure Python —
+  deliberately not pgvector/Chroma, which aren't Termux-installable
+  without native compilation, same problem class as `pydantic-core`.
+  `AIProvider.embed()` was added to the provider interface (default
+  raises `NotImplementedError`, so a provider without embedding support
+  is skipped by the fallback chain the same way a down provider is);
+  `OllamaProvider.embed()` is a real implementation against Ollama's
+  `/api/embeddings`. `POST /api/v1/knowledge/ingest` and
+  `POST /api/v1/knowledge/query` are the storage/retrieval endpoints;
+  `POST /api/v1/departments/{slug}/invoke` gained an opt-in
+  `"use_knowledge": true` flag that retrieves top-k relevant chunks and
+  prepends them as context before generation — the department agent
+  itself stays unaware RAG happened, the router builds the augmented
+  prompt.
+- **Workflow engine** (`app/workflows/`): named, multi-step,
+  multi-department sequences (`release_review`: Engineering → QA →
+  DevOps; `vendor_onboarding`: Procurement → Legal → Finance), each
+  step's prompt able to reference `{input}` and `{previous}` so steps
+  genuinely chain. **Executes synchronously within the request** rather
+  than as a fire-and-forget background task with polling — a
+  deliberate, documented trade-off (see `app/workflows/router.py`'s
+  module docstring): background execution against Starlette's sync
+  `TestClient` can't be verified deterministically, and shipping an
+  orchestration feature whose correctness can't be fully tested was the
+  wrong call given this project's standing bar. `WorkflowRun` /
+  `WorkflowStepRun` persist history either way, so a future
+  Celery-backed async executor (Phase 4, production-only) can write to
+  the identical schema — only who calls the step execution and when
+  changes, not the data model.
+- **Permission management** (`app/permissions/`): `GET /api/v1/permissions`
+  auto-seeds one `Permission` row per department's `required_permission`
+  code from the registry (idempotent, so the catalog can never drift out
+  of sync with what's actually enforced), plus role CRUD and
+  user-role/role-permission assignment. This closes a real gap from
+  Phase 1.1/2: previously the only way for a non-owner user to do
+  anything was for the tenant owner to give up and mark them
+  `is_tenant_owner` too. Now a staff user can be given a `Role` with just
+  `engineering.act`, verified end-to-end by a test that checks they get
+  a 503 (reached the AI Gateway) instead of a 403 (denied by RBAC) on
+  `/api/v1/departments/engineering/invoke`.
+
+**Explicitly deferred to Phase 4**: async/Celery-backed workflow
+execution with polling (production-only, once Redis/Celery are
+available), a dedicated non-Ollama embedding provider (Voyage AI/OpenAI)
+for tenants who don't want to run local models, and pgvector as the
+production-scale vector store swap once corpus size actually demands it.
+
+Full verification for this phase: fresh venv install (zero native
+compilation, unchanged), all 7 migrations applying cleanly to SQLite
+(including two more RLS-extension migrations, same no-op-on-SQLite
+pattern), 65/65 tests passing, and a live `uvicorn` process handling the
+complete register → list workflows → run workflow (graceful 503) → get
+run status → knowledge ingest (graceful 503) → list permissions (26,
+auto-seeded) → create role → assign permission flow via real `curl`
+calls.
+
+## 17. Next (Phase 4 preview)
+
+Async/Celery-backed workflow execution with polling (production-only),
+a dedicated embedding provider beyond Ollama, pgvector as the
+vector-store swap at scale, and the remaining dashboard widgets (KPIs,
+sales pipeline, financial summary) once a department has real business
+data behind it.

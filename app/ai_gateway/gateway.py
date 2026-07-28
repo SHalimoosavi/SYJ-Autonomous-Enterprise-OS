@@ -38,10 +38,14 @@ class AIGateway:
         chain = dept_cfg.get(task_type) or dept_cfg.get("default")
         return chain or self._routing["default_fallback_chain"]
 
-    async def generate(self, department: str, task_type: str, request: AIRequest) -> AIResponse:
-        chain = self._resolve_chain(department, task_type)
+    async def _walk_chain(self, chain: list[dict], call, failure_label: str):
+        """Shared fallback-chain walker used by both generate() and embed():
+        try each [provider, model] entry in order, skip unregistered
+        providers, catch any failure (including a provider that simply
+        doesn't implement the operation, e.g. embed() on Anthropic) and
+        fall through, raising AllProvidersFailedError only once every
+        entry has been tried."""
         last_error: Exception | None = None
-
         for entry in chain:
             provider_name, model = entry["provider"], entry["model"]
             provider = self._providers.get(provider_name)
@@ -49,15 +53,22 @@ class AIGateway:
                 logger.warning("gateway.provider_not_registered", provider=provider_name)
                 continue
             try:
-                return await provider.generate(request, model)
+                return await call(provider, model)
             except Exception as exc:  # noqa: BLE001 — intentional: fall through to next in chain
                 logger.warning("gateway.provider_failed", provider=provider_name, model=model, error=str(exc))
                 last_error = exc
                 continue
+        raise AllProvidersFailedError(f"All providers in fallback chain exhausted for {failure_label}: {last_error}")
 
-        raise AllProvidersFailedError(
-            f"All providers in fallback chain exhausted for {department}.{task_type}: {last_error}"
-        )
+    async def generate(self, department: str, task_type: str, request: AIRequest) -> AIResponse:
+        chain = self._resolve_chain(department, task_type)
+        return await self._walk_chain(chain, lambda p, m: p.generate(request, m), f"{department}.{task_type}")
+
+    async def embed(self, text: str) -> list[float]:
+        chain = self._routing.get("embedding_fallback_chain") or []
+        if not chain:
+            raise AllProvidersFailedError("No embedding_fallback_chain configured in routing.yaml")
+        return await self._walk_chain(chain, lambda p, m: p.embed(text, m), "embedding")
 
 
 def build_default_gateway() -> AIGateway:

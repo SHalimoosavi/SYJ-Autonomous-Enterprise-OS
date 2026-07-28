@@ -9,6 +9,16 @@ default_fallback_chain:
   - provider: ollama
     model: qwen2.5:14b
 
+# Used by AIGateway.embed() for the RAG knowledge base. Anthropic and
+# OpenRouter's chat-completion APIs don't expose embeddings the way this
+# project's provider interface expects, so this chain is Ollama-only for
+# now; a dedicated embeddings provider (Voyage AI, OpenAI, Gemini) is a
+# one-line addition here + a provider.embed() implementation, same
+# pattern as generate().
+embedding_fallback_chain:
+  - provider: ollama
+    model: nomic-embed-text
+
 departments:
   engineering:
     code_generation:

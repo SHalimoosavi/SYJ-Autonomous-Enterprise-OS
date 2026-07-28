@@ -33,3 +33,16 @@ class OllamaProvider(AIProvider):
                 return r.status_code == 200
         except Exception:
             return False
+
+    async def embed(self, text: str, model: str) -> list[float]:
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                f"{self.base_url}/api/embeddings",
+                json={"model": model, "prompt": text},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            embedding = data.get("embedding")
+            if not embedding:
+                raise ValueError(f"Ollama returned no embedding for model {model}")
+            return embedding
