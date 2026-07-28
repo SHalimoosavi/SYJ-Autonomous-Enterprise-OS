@@ -8,6 +8,9 @@ from starlette.routing import Route
 
 from app.auth.rbac import protected
 from app.auth.router import routes as auth_routes
+from app.api.v1.departments_router import routes as department_routes
+from app.approvals.router import routes as approval_routes
+from app.dashboard.router import routes as dashboard_routes
 
 
 async def health(request):
@@ -29,18 +32,11 @@ async def me(request):
     )
 
 
-@protected(permission_code="executive.view_briefing")
-async def executive_briefing_placeholder(request):
-    """Authenticated AND authorized: proves require_permission's owner
-    bypass + role/permission path both work. Wiring this to a real
-    ExecutiveOfficeAgent.run() call (which hits the AI Gateway) is Phase 2 --
-    this route exists in Phase 1.1 purely to validate the RBAC gate."""
-    return JSONResponse({"status": "authorized", "note": "AI Gateway call wired in Phase 2"})
-
-
 routes = [
     Route("/api/v1/health", health),
     Route("/api/v1/auth/me", me),
-    Route("/api/v1/executive/briefing", executive_briefing_placeholder),
     *auth_routes,
+    *department_routes,
+    *approval_routes,
+    *dashboard_routes,
 ]

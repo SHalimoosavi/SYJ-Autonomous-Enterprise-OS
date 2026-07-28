@@ -218,12 +218,68 @@ migrations applying cleanly against SQLite, 26/26 tests passing, and a
 live `uvicorn` process handling real `curl` requests through the entire
 register → login → authenticated → permission-gated flow.
 
-## 13. Next (Phase 2 preview)
+## 14. Phase 2 — Department registry, Approval Queue, audit logging, CEO briefing (complete)
 
-Implement the remaining 25 departments on the `DepartmentAgent` pattern,
-wire a real endpoint that calls `ExecutiveOfficeAgent.run()` through the
-AI Gateway (replacing the Phase 1.1 placeholder), add RAG/vector DB
-abstraction, wire Celery for async department workflows, and start the
-dashboard API surface (CEO Briefing, KPIs, Approval Queue). A role/permission
-management endpoint (assign permissions to roles, assign roles to users)
-is also worth adding here now that Role/Permission have a real consumer.
+- **All 26 departments from the master spec are real, callable agents**
+  (`app/departments/registry.py`), reachable via a single generic
+  `POST /api/v1/departments/{slug}/invoke`. Executive Office keeps its
+  bespoke subclass (custom `should_escalate`); the other 25 run through
+  `GenericDepartmentAgent`, driven entirely by an `AgentCapability`
+  definition. This is a deliberate scope choice: full RBAC gating, audit
+  logging, and graceful AI-Gateway-failure handling are identical for
+  every department, so one route + a data table covers all 26 correctly
+  rather than 26 partially-tested bespoke route handlers.
+- **Fixed a real pre-existing bug**: `build_default_gateway()` was
+  constructing `AnthropicProvider(api_key="${ANTHROPIC_API_KEY}")` — a
+  literal string, not an environment lookup. That key would never have
+  worked. `Settings` now has real `ANTHROPIC_API_KEY` /
+  `OPENROUTER_API_KEY` / `OLLAMA_BASE_URL` fields, and the gateway only
+  registers a provider if its credential is actually present (Ollama,
+  needing no key, is always registered). A missing/misconfigured provider
+  is skipped by the fallback chain instead of silently never working.
+- **Approval Queue** (`app/approvals/`): the concrete implementation of
+  "the CEO approves strategic decisions, financial commitments, legal
+  matters, and exceptions" from the master spec's Human Role section.
+  Create/list are available to any authenticated user in the tenant;
+  deciding (`approve`/`reject`) is restricted to the tenant owner or a
+  platform admin. Covered by Postgres RLS the same way `users`/`roles`/
+  `audit_logs` are.
+- **Audit logging is now actually wired in** (`app/audit/service.py`).
+  The `AuditLog` table existed since Phase 1 but nothing ever wrote to
+  it — a real gap, now closed: every department invocation (success or
+  the graceful-failure path), every approval creation/decision, gets a
+  row.
+- **CEO Briefing** (`GET /api/v1/dashboard/briefing`, owner/admin only):
+  aggregates real numbers (pending approvals, total audit events) from
+  the database, then attempts an AI-synthesized narrative on top via
+  `ExecutiveOfficeAgent`. If no provider is configured or reachable
+  (a completely normal state on a fresh install before API keys are
+  added), the endpoint still returns the real numbers with a clear
+  `ai_synthesis_error` field — verified explicitly by test and by a live
+  `curl` call in this exact "no keys configured" state, not assumed.
+
+**Explicitly deferred to Phase 3, not attempted here**: RAG/vector DB
+abstraction, Celery-based async workflows (Redis/Celery stay
+Production-Deployment-only per `docs/TERMUX.md`; Termux-compatible
+in-process orchestration is a Phase 3 design task), Role/Permission
+management endpoints (assigning permissions to roles via API — the
+tenant-owner-bypass model covers Phase 1–2's needs without this), and
+the remaining Dashboard widgets (KPIs, sales pipeline, financial
+summary) that need department-specific data sources which don't exist
+yet. Naming these explicitly rather than silently leaving them out.
+
+Full verification for this phase: fresh venv install (zero native
+compilation, unchanged from Phase 1), all 5 migrations applying cleanly
+to SQLite, 39/39 tests passing, and a live `uvicorn` process handling
+the complete register → invoke-department (graceful 503) → create
+approval → decide approval → CEO briefing flow via real `curl` calls.
+
+## 15. Next (Phase 3 preview)
+
+RAG/vector DB abstraction (pure-Python in-memory backend for Termux dev,
+documented upgrade path to pgvector/Chroma in production), a
+Termux-compatible in-process workflow engine for multi-step department
+tasks (with Celery as the documented production swap), Role/Permission
+management endpoints, and the remaining dashboard widgets once a
+department has real business data behind it (e.g. Sales pipeline once
+the Sales department has a real CRM-like data model).

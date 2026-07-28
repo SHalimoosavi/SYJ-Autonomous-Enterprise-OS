@@ -67,6 +67,11 @@ class Settings:
 
     # --- AI Gateway ---
     AI_ROUTING_CONFIG_PATH: str = "app/ai_gateway/routing.yaml"
+    ANTHROPIC_API_KEY: str = ""
+    OPENROUTER_API_KEY: str = ""
+    OPENAI_API_KEY: str = ""
+    GEMINI_API_KEY: str = ""
+    OLLAMA_BASE_URL: str = "http://localhost:11434"
 
     @classmethod
     def from_env(cls) -> "Settings":

@@ -147,49 +147,10 @@ def test_token_rejected_when_replayed_against_a_different_tenant_header():
     )
     assert resp.status_code == 401
 
-
-def test_tenant_owner_bypasses_permission_gate():
-    reg = _register(tenant_slug="theta", email="owner@theta.test", password="correct-horse-1")
-    token = reg.json()["access_token"]
-    resp = client.get(
-        "/api/v1/executive/briefing",
-        headers={"X-Tenant-ID": "theta", "Authorization": f"Bearer {token}"},
-    )
-    assert resp.status_code == 200
-    assert resp.json()["status"] == "authorized"
-
-
-def test_non_owner_without_permission_is_denied():
-    """A user who is neither a platform admin nor the tenant owner, and
-    holds no matching permission via a role, must be denied."""
-    from app.auth.models import User
-    from app.core.database import AsyncSessionLocal
-    from app.core.security import create_access_token, hash_password
-
-    async def _make_plain_user():
-        async with AsyncSessionLocal() as session:
-            from sqlalchemy import select
-            from app.tenancy.models import Tenant
-
-            tenant = (await session.execute(select(Tenant).where(Tenant.slug == "acme"))).scalar_one()
-            user = User(
-                tenant_id=tenant.id,
-                email="staff@acme.test",
-                hashed_password=hash_password("staffpassword1"),
-                is_platform_admin=False,
-                is_tenant_owner=False,
-            )
-            session.add(user)
-            await session.commit()
-            await session.refresh(user)
-            return user
-
-    _register()  # creates tenant "acme"
-    user = asyncio.run(_make_plain_user())
-    token = create_access_token(subject=user.id, tenant_id=user.tenant_id)
-
-    resp = client.get(
-        "/api/v1/executive/briefing",
-        headers={"X-Tenant-ID": "acme", "Authorization": f"Bearer {token}"},
-    )
-    assert resp.status_code == 403
+# Note: the old /api/v1/executive/briefing placeholder route from Phase 1.1
+# was replaced in Phase 2 by the generic /api/v1/departments/{slug}/invoke
+# endpoint. The owner-bypass and non-owner-denied RBAC behavior it used to
+# test here is now covered more precisely in tests/test_departments_and_approvals.py
+# (test_owner_bypasses_department_permission_gate_before_hitting_gateway and
+# test_invoke_with_no_provider_configured_returns_503_not_500), which also
+# distinguish the RBAC-denial path from the AI-Gateway-failure path.

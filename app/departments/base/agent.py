@@ -45,3 +45,19 @@ class DepartmentAgent(ABC):
     def should_escalate(self, context: dict) -> EscalationRule | None:
         """Override per-agent with real logic; base returns None (no escalation)."""
         return None
+
+
+class GenericDepartmentAgent(DepartmentAgent):
+    """
+    A DepartmentAgent driven entirely by a capability definition, rather
+    than a bespoke subclass. This is what lets all 26 departments from the
+    master spec exist as real, callable agents (see
+    app/departments/registry.py) without 26 near-identical Python files --
+    each one is a few lines of data. Departments with genuinely custom
+    logic (see ExecutiveOfficeAgent's should_escalate override) still get
+    a real subclass; this is the default for everything else.
+    """
+
+    def __init__(self, gateway: AIGateway, capability: AgentCapability):
+        super().__init__(gateway)
+        self.capability = capability

@@ -11,6 +11,7 @@ which model handles a task, edit routing.yaml. Agent code never changes.
 """
 import yaml
 import structlog
+from functools import lru_cache
 
 from app.ai_gateway.providers.base import AIProvider, AIRequest, AIResponse
 from app.ai_gateway.providers.anthropic_provider import AnthropicProvider
@@ -60,12 +61,26 @@ class AIGateway:
 
 
 def build_default_gateway() -> AIGateway:
-    """Wires up the registry. Add new providers here — one line each."""
+    """
+    Wires up the registry from real settings (see app/core/config.py).
+    Providers requiring a key are only registered if that key is actually
+    present -- an unregistered provider is skipped by the fallback chain
+    (logged as a warning) rather than raising with a bogus/empty key.
+    Add a new provider here in one line, same pattern.
+    """
     registry: dict[str, AIProvider] = {
-        "claude": AnthropicProvider(api_key="${ANTHROPIC_API_KEY}"),
-        "ollama": OllamaProvider(),
-        "openrouter": OpenRouterProvider(api_key="${OPENROUTER_API_KEY}"),
-        # "openai": OpenAIProvider(...),   # add per same pattern
-        # "gemini": GeminiProvider(...),
+        "ollama": OllamaProvider(base_url=settings.OLLAMA_BASE_URL),  # no key required
     }
+    if settings.ANTHROPIC_API_KEY:
+        registry["claude"] = AnthropicProvider(api_key=settings.ANTHROPIC_API_KEY)
+    if settings.OPENROUTER_API_KEY:
+        registry["openrouter"] = OpenRouterProvider(api_key=settings.OPENROUTER_API_KEY)
+    # if settings.OPENAI_API_KEY: registry["openai"] = OpenAIProvider(...)
+    # if settings.GEMINI_API_KEY: registry["gemini"] = GeminiProvider(...)
     return AIGateway(settings.AI_ROUTING_CONFIG_PATH, registry)
+
+
+@lru_cache
+def get_gateway() -> AIGateway:
+    """Process-wide singleton so routing.yaml is parsed once, not per-request."""
+    return build_default_gateway()
