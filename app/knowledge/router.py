@@ -9,9 +9,10 @@ from starlette.routing import Route
 from app.ai_gateway.gateway import AllProvidersFailedError, get_gateway
 from app.audit.service import record_audit
 from app.auth.rbac import Unauthorized, get_current_user
-from app.core.database import AsyncSessionLocal, set_tenant_context
+from app.core.config import get_settings
+from app.core.database import AsyncSessionLocal, engine, set_tenant_context
 from app.knowledge.models import KnowledgeChunk
-from app.knowledge.vector_store import top_k
+from app.knowledge.vector_store import _vector_literal, top_k
 
 EMBEDDING_MODEL = "nomic-embed-text"  # must match routing.yaml's embedding_fallback_chain
 
@@ -38,6 +39,7 @@ async def ingest(request: Request):
             {"detail": "No embedding provider is currently available.", "error": str(exc)}, status_code=503
         )
 
+    settings = get_settings()
     async with AsyncSessionLocal() as session:
         await set_tenant_context(session, user.tenant_id)
         chunk = KnowledgeChunk(
@@ -51,6 +53,19 @@ async def ingest(request: Request):
         session.add(chunk)
         await session.commit()
         await session.refresh(chunk)
+
+        # Also populate the native pgvector column for fast search, when
+        # running against Postgres with the pgvector migration applied.
+        # The JSON `embedding` column above is always the canonical,
+        # portable copy; this is purely a production performance path.
+        if engine.dialect.name == "postgresql" and settings.VECTOR_STORE_BACKEND == "pgvector":
+            from sqlalchemy import text
+            await session.execute(
+                text("UPDATE knowledge_chunks SET embedding_vector = :vec WHERE id = :id"),
+                {"vec": _vector_literal(embedding), "id": chunk.id},
+            )
+            await session.commit()
+
         await record_audit(session, user.tenant_id, user.id, "knowledge.ingest", resource=chunk.id)
 
     return JSONResponse({"id": chunk.id, "department": chunk.department}, status_code=201)

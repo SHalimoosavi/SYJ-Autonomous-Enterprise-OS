@@ -71,7 +71,16 @@ class Settings:
     OPENROUTER_API_KEY: str = ""
     OPENAI_API_KEY: str = ""
     GEMINI_API_KEY: str = ""
+    VOYAGE_API_KEY: str = ""
     OLLAMA_BASE_URL: str = "http://localhost:11434"
+
+    # --- Phase 4: async workflow execution (production only) ---
+    CELERY_BROKER_URL: str = "redis://localhost:6379/1"
+    WORKFLOW_ASYNC_ENABLED: bool = False
+
+    # --- Phase 4: vector store backend ---
+    VECTOR_STORE_BACKEND: str = "memory"  # "memory" (Termux-safe default) or "pgvector" (production)
+    VECTOR_DIMENSIONS: int = 768  # must match your embedding model's output size
 
     @classmethod
     def from_env(cls) -> "Settings":

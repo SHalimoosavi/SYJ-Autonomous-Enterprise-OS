@@ -17,10 +17,11 @@ from app.ai_gateway.providers.base import AIProvider, AIRequest, AIResponse
 from app.ai_gateway.providers.anthropic_provider import AnthropicProvider
 from app.ai_gateway.providers.ollama_provider import OllamaProvider
 from app.ai_gateway.providers.openrouter_provider import OpenRouterProvider
+from app.ai_gateway.providers.openai_provider import OpenAIProvider
+from app.ai_gateway.providers.voyage_provider import VoyageProvider
 from app.core.config import get_settings
 
 logger = structlog.get_logger()
-settings = get_settings()
 
 
 class AllProvidersFailedError(RuntimeError):
@@ -78,7 +79,15 @@ def build_default_gateway() -> AIGateway:
     present -- an unregistered provider is skipped by the fallback chain
     (logged as a warning) rather than raising with a bogus/empty key.
     Add a new provider here in one line, same pattern.
+
+    Calls get_settings() fresh rather than using a module-level capture:
+    get_settings() is itself lru_cache'd (see app/core/config.py), so this
+    is still cheap, but a module-level `settings = get_settings()` here
+    would freeze whatever was true at import time -- invisible to config
+    changes (e.g. in tests that clear the settings cache to simulate a
+    key being added/removed) for the lifetime of the process.
     """
+    settings = get_settings()
     registry: dict[str, AIProvider] = {
         "ollama": OllamaProvider(base_url=settings.OLLAMA_BASE_URL),  # no key required
     }
@@ -86,7 +95,10 @@ def build_default_gateway() -> AIGateway:
         registry["claude"] = AnthropicProvider(api_key=settings.ANTHROPIC_API_KEY)
     if settings.OPENROUTER_API_KEY:
         registry["openrouter"] = OpenRouterProvider(api_key=settings.OPENROUTER_API_KEY)
-    # if settings.OPENAI_API_KEY: registry["openai"] = OpenAIProvider(...)
+    if settings.OPENAI_API_KEY:
+        registry["openai"] = OpenAIProvider(api_key=settings.OPENAI_API_KEY)
+    if settings.VOYAGE_API_KEY:
+        registry["voyage"] = VoyageProvider(api_key=settings.VOYAGE_API_KEY)
     # if settings.GEMINI_API_KEY: registry["gemini"] = GeminiProvider(...)
     return AIGateway(settings.AI_ROUTING_CONFIG_PATH, registry)
 

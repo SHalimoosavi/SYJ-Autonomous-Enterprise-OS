@@ -53,7 +53,17 @@ pytest-asyncio==0.25.2
 # --- Production-only (install on Linux/cloud, NOT required in Termux) ---
 # asyncpg==0.30.0          # Postgres async driver — no Android wheels, C build
 # redis==5.2.1              # Event bus / Celery broker — needs native redis-server
-# celery==5.4.0             # Background workers — run on production host only
+# celery==5.4.0             # Async workflow execution — needs a running Redis broker + worker process.
+#                            # Live-verified (real Postgres+pgvector, real Redis+Celery
+#                            # worker) in Phase 4 — see docs/TERMUX.md.
+# pgvector==0.5.0            # Pure-Python (py3-none-any wheel) — but only useful with a
+#                            # Postgres server that has the vector extension installed
+#                            # (postgresql-16-pgvector or equivalent), which Termux doesn't
+#                            # provide. Note: SAEOS's own pgvector integration
+#                            # (app/knowledge/vector_store.py) uses raw SQL and does NOT
+#                            # actually require this pip package at all — it's listed here
+#                            # only for projects that want the pgvector.sqlalchemy.Vector
+#                            # ORM type directly.
 # fastapi==0.118.0          # Optional: layer back on top of Starlette for
 #                            # auto OpenAPI docs once deploying to a glibc
 #                            # host where pydantic-core installs as a

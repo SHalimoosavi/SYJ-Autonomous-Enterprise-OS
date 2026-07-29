@@ -15,9 +15,19 @@ default_fallback_chain:
 # now; a dedicated embeddings provider (Voyage AI, OpenAI, Gemini) is a
 # one-line addition here + a provider.embed() implementation, same
 # pattern as generate().
+# Used by AIGateway.embed() for the RAG knowledge base. Ollama first
+# (free, local, no key needed -- good default for Termux/dev); OpenAI and
+# Voyage AI as production fallbacks for tenants who don't run local
+# models. Only providers with a configured API key are ever registered
+# (see gateway.py's build_default_gateway), so an unconfigured entry here
+# is skipped exactly like a down provider, not an error.
 embedding_fallback_chain:
   - provider: ollama
     model: nomic-embed-text
+  - provider: voyage
+    model: voyage-3-lite
+  - provider: openai
+    model: text-embedding-3-small
 
 departments:
   engineering:

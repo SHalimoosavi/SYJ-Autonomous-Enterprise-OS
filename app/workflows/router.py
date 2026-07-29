@@ -1,30 +1,34 @@
 """
-Workflow execution: synchronous, step-by-step, within the request.
+Workflow execution: synchronous (default) or async via Celery+Redis
+(opt-in, production only).
 
-Deliberate design choice, not a shortcut: a fire-and-forget background
-task (asyncio.create_task) that the caller polls for completion is
-genuinely hard to verify deterministically against Starlette's sync
-TestClient -- the background task's completion isn't guaranteed to
-happen before a subsequent poll request in a way that's reliable to
-assert on in a test. Rather than ship an orchestration feature whose
-correctness can't be fully verified, each step executes and is persisted
-in order within the HTTP request itself, and the full result (or the
-failure point) comes back in the response. For workloads where this
-becomes too slow for a single HTTP request, the production upgrade path
-is a Celery task per step writing to these same WorkflowRun /
-WorkflowStepRun tables -- the schema doesn't change, only who calls
-_execute_step and when.
+The synchronous path executes each step in order within the HTTP request
+itself and returns the full result (or the failure point) in the
+response -- the default for Termux/dev, requiring nothing beyond what's
+already in requirements.txt.
+
+The async path (`"async": true` in the request body) creates the
+WorkflowRun row, enqueues a Celery task, and returns 202 immediately with
+the run_id for polling via GET /api/v1/workflows/runs/{run_id}. This
+requires Celery+Redis to actually be running and
+WORKFLOW_ASYNC_ENABLED=true in settings -- see docs/TERMUX.md for why
+these aren't part of the default Termux install, and
+app/workflows/executor.py's docstring for why both paths write to the
+identical WorkflowRun/WorkflowStepRun schema.
 """
+from datetime import datetime, timezone
+
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from app.ai_gateway.gateway import AllProvidersFailedError, get_gateway
-from app.audit.service import record_audit
+from app.ai_gateway.gateway import get_gateway
 from app.auth.rbac import PermissionDenied, Unauthorized, get_current_user, require_permission
+from app.core.config import get_settings
 from app.core.database import AsyncSessionLocal, set_tenant_context
 from app.departments.registry import get_agent
-from app.workflows.models import RunStatus, WorkflowRun, WorkflowStepRun
+from app.workflows.executor import execute_workflow_run
+from app.workflows.models import RunStatus, WorkflowRun
 from app.workflows.registry import get_workflow, list_workflows
 
 
@@ -61,8 +65,19 @@ async def run_workflow(request: Request):
 
     body = await request.json() if request.headers.get("content-length", "0") != "0" else {}
     input_prompt = (body or {}).get("input", "").strip()
+    run_async = bool((body or {}).get("async", False))
     if not input_prompt:
         return JSONResponse({"detail": "input is required"}, status_code=400)
+
+    if run_async:
+        settings = get_settings()
+        if not settings.WORKFLOW_ASYNC_ENABLED:
+            return JSONResponse(
+                {"detail": "Async workflow execution is not enabled (set WORKFLOW_ASYNC_ENABLED=true "
+                            "and run a Celery worker; see docs/TERMUX.md). Falling back to sync execution "
+                            "is not automatic -- retry without \"async\": true, or enable it."},
+                status_code=503,
+            )
 
     async with AsyncSessionLocal() as session:
         await set_tenant_context(session, user.tenant_id)
@@ -74,66 +89,22 @@ async def run_workflow(request: Request):
         await session.commit()
         await session.refresh(run)
 
-    previous_output = ""
-    step_results = []
+    if run_async:
+        # Imported lazily: only touches Celery when async mode is actually
+        # requested and enabled, so a default Termux install never needs
+        # Celery installed at all (see tasks.py's module docstring).
+        from app.workflows.tasks import execute_workflow_task
+        execute_workflow_task.delay(run.id, user.tenant_id, user.id, slug, input_prompt)
+        return JSONResponse({"run_id": run.id, "status": "queued"}, status_code=202)
 
-    for index, step in enumerate(workflow.steps):
-        agent = get_agent(step.department, gateway)
-        prompt = step.prompt_template.format(input=input_prompt, previous=previous_output or "(no prior step)")
-
-        async with AsyncSessionLocal() as session:
-            await set_tenant_context(session, user.tenant_id)
-            try:
-                response = await agent.run(prompt, tenant_id=user.tenant_id)
-            except AllProvidersFailedError as exc:
-                step_row = WorkflowStepRun(
-                    run_id=run.id, step_index=index, department=step.department,
-                    status=RunStatus.FAILED, error=str(exc),
-                )
-                session.add(step_row)
-                run.status = RunStatus.FAILED
-                run.error = f"Step {index} ({step.department}) failed: {exc}"
-                from datetime import datetime, timezone
-                run.completed_at = datetime.now(timezone.utc)
-                session.add(run)
-                await session.commit()
-                await record_audit(
-                    session, user.tenant_id, user.id, "workflow.failed",
-                    resource=run.id, metadata={"workflow": slug, "failed_step": step.department, "error": str(exc)},
-                )
-                return JSONResponse(
-                    {
-                        "run_id": run.id, "status": "failed",
-                        "failed_step": step.department, "error": str(exc),
-                        "completed_steps": step_results,
-                    },
-                    status_code=503,
-                )
-
-            step_row = WorkflowStepRun(
-                run_id=run.id, step_index=index, department=step.department,
-                status=RunStatus.COMPLETED, output_text=response.text,
-            )
-            session.add(step_row)
-            await session.commit()
-
-        step_results.append({"department": step.department, "output": response.text})
-        previous_output = response.text
-
-    async with AsyncSessionLocal() as session:
-        await set_tenant_context(session, user.tenant_id)
-        from datetime import datetime, timezone
-        run.status = RunStatus.COMPLETED
-        run.completed_at = datetime.now(timezone.utc)
-        session.add(run)
-        await session.commit()
-        await record_audit(session, user.tenant_id, user.id, "workflow.completed", resource=run.id, metadata={"workflow": slug})
-
-    return JSONResponse({"run_id": run.id, "status": "completed", "steps": step_results})
+    result = await execute_workflow_run(run.id, user.tenant_id, user.id, slug, input_prompt)
+    status_code = 200 if result["status"] == "completed" else 503
+    return JSONResponse({"run_id": run.id, **result}, status_code=status_code)
 
 
 async def get_run(request: Request):
     from sqlalchemy import select
+    from app.workflows.models import WorkflowStepRun
 
     run_id = request.path_params["run_id"]
     try:

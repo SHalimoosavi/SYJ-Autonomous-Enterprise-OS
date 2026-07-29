@@ -333,10 +333,108 @@ run status → knowledge ingest (graceful 503) → list permissions (26,
 auto-seeded) → create role → assign permission flow via real `curl`
 calls.
 
-## 17. Next (Phase 4 preview)
+## 18. Phase 4 — async workflow execution, dedicated embedding providers, pgvector, dashboard widgets (complete)
 
-Async/Celery-backed workflow execution with polling (production-only),
-a dedicated embedding provider beyond Ollama, pgvector as the
-vector-store swap at scale, and the remaining dashboard widgets (KPIs,
-sales pipeline, financial summary) once a department has real business
-data behind it.
+This phase touched real external infrastructure (Postgres+pgvector,
+Redis+Celery) that isn't part of the Termux/SQLite default path, so
+everything below states plainly what was actually live-verified against
+real running services in this environment versus what's unit-tested
+only -- the same standard as the RLS disclosure in Phase 1.1, not
+weakened for this phase.
+
+**Dashboard widgets** (`app/dashboard/models.py`, extending
+`app/dashboard/router.py`): `KPIMetric`, `SalesDeal`, `FinancialTransaction`
+-- plain DB CRUD + aggregation, zero AI Gateway dependency, fully
+unit-tested (`tests/test_dashboard_widgets.py`). The CEO Briefing now
+includes real open-pipeline-value and net-financial-position numbers
+alongside the Phase 2 approval/audit counts.
+
+**Dedicated embedding providers**: `OpenAIProvider` (generate + embed)
+and `VoyageProvider` (embed-only, Voyage has no chat-completion API) —
+same pattern as every other provider, registered only when their API key
+is configured, added to `routing.yaml`'s `embedding_fallback_chain`
+after Ollama. Real network calls untested (no live credentials here,
+consistent with Anthropic/OpenRouter since Phase 1); registration logic
+is unit-tested.
+
+**A real bug this phase caught**: `gateway.py` captured `settings` as a
+module-level global at import time instead of calling `get_settings()`
+fresh inside `build_default_gateway()` -- meaning config changes after
+process startup were invisible to it. Fixed; caught by a test asserting
+the gateway only registers providers whose keys are actually present.
+
+**pgvector** (`app/knowledge/vector_store.py`, `alembic/versions/d4e5f6a7b8c9_*`):
+**Live-verified** against a real PostgreSQL 16 + pgvector 0.6.0 instance
+installed in this environment specifically to test this properly, not
+just written and assumed correct. That process caught two more real
+bugs before it passed:
+  - **`alembic/env.py` was silently ignoring `DATABASE_URL` entirely**,
+    always migrating the hardcoded SQLite URL from `alembic.ini`
+    regardless of what the app was actually configured to use. This
+    means every prior phase's "migrations apply cleanly" claim was true
+    only for SQLite -- the RLS/schema migrations had never actually run
+    against Postgres until this fix. Fixed by forcing
+    `config.set_main_option("sqlalchemy.url", get_settings().DATABASE_URL)`
+    in `env.py`.
+  - asyncpg's prepared-statement protocol raised `AmbiguousParameterError`
+    on a nullable `:department` parameter compared against `NULL` with
+    no type hint, and separately, SQLAlchemy's `text()` bind-parameter
+    parser doesn't accept `:param::type` inline-cast syntax (conflicts
+    with its own colon-based parsing). Fixed with explicit
+    `CAST(:department AS VARCHAR)`.
+
+  After both fixes: real HNSW-indexed cosine search against live data
+  returns correctly ranked results (exact match scored 1.0, a near-match
+  0.9939, an opposite vector -1.0) -- see `tests/test_pgvector_live.py`
+  (skipped by default, runs when `PGVECTOR_TEST_DATABASE_URL` is set).
+  The JSON `embedding` column stays canonical/portable; `embedding_vector`
+  is a Postgres-only performance path written alongside it. Fixed at
+  768 dimensions (matching `nomic-embed-text`); switching embedding
+  models with a different output size needs a new migration to resize
+  the column -- a real, disclosed constraint.
+
+**Async workflow execution** (`app/workflows/executor.py`,
+`celery_app.py`, `tasks.py`): the step-execution loop was extracted from
+the Phase 3 synchronous router into a shared function used by both the
+default sync path (unchanged behavior, all Phase 3 tests pass
+byte-for-byte identical) and a new opt-in `"async": true` mode that
+enqueues a Celery task and returns 202 immediately, polled via the
+existing `GET /api/v1/workflows/runs/{run_id}`. **Live-verified** against
+a real Redis broker and a real, separately-running `celery -A
+app.workflows.tasks worker` process -- not Celery's eager-mode testing
+shortcut. That process caught two more real bugs:
+  - Starting the worker with `-A app.workflows.celery_app` (the Celery
+    app definition) rather than `-A app.workflows.tasks` (the module
+    that actually registers the task via the decorator) produces a
+    worker that starts cleanly and connects to Redis, but has an empty
+    task registry and can never execute anything sent to it.
+  - The worker process, unlike the main app, doesn't transitively import
+    every model module -- so `WorkflowRun.tenant_id`'s foreign key to
+    `tenants.id` couldn't resolve the first time a task touched the DB
+    (`NoReferencedTableError`), because `Tenant` was never imported in
+    that process. Fixed with the same explicit-model-imports pattern
+    already used in `alembic/env.py`.
+
+  After both fixes: a task submitted by the API process was picked up,
+  executed, and had its result (a correctly-detected AI Gateway failure,
+  since no provider is configured in this environment) written back to
+  the database entirely by the separate worker process, and read back
+  correctly by the API's polling endpoint one second later. See
+  `tests/test_async_workflow_live.py` (skipped by default, runs when
+  `CELERY_LIVE_TEST=true` with a real worker running).
+
+Neither Celery/Redis nor Postgres/pgvector are part of the default
+`requirements.txt` or the Termux install path -- both remain exactly
+where Phase 1 put them, Production Deployment only, per `docs/TERMUX.md`.
+The default SQLite/sync/pure-Python path is unchanged and fully
+re-verified: fresh venv, zero native compilation, all 9 migrations clean
+on SQLite, 80 tests passing (plus 2 correctly skipping without live
+infra), before any of the above infrastructure was ever touched.
+
+## 19. Next (Phase 5 preview)
+
+Gemini as a fourth generate() provider (settings field already exists,
+unused), a role/permission admin UI (currently API-only), rate limiting
+on the department invoke endpoint, and the remaining master-spec
+departments' deeper bespoke logic (only Executive Office has real
+`should_escalate` behavior beyond the generic department pattern).
