@@ -9,18 +9,13 @@ default_fallback_chain:
   - provider: ollama
     model: qwen2.5:14b
 
-# Used by AIGateway.embed() for the RAG knowledge base. Anthropic and
-# OpenRouter's chat-completion APIs don't expose embeddings the way this
-# project's provider interface expects, so this chain is Ollama-only for
-# now; a dedicated embeddings provider (Voyage AI, OpenAI, Gemini) is a
-# one-line addition here + a provider.embed() implementation, same
-# pattern as generate().
 # Used by AIGateway.embed() for the RAG knowledge base. Ollama first
-# (free, local, no key needed -- good default for Termux/dev); OpenAI and
-# Voyage AI as production fallbacks for tenants who don't run local
-# models. Only providers with a configured API key are ever registered
-# (see gateway.py's build_default_gateway), so an unconfigured entry here
-# is skipped exactly like a down provider, not an error.
+# (free, local, no key needed -- good default for Termux/dev); Voyage,
+# OpenAI, and Gemini as production fallbacks for tenants who don't run
+# local models. Only providers with a configured API key are ever
+# registered (see gateway.py's build_default_gateway), so an
+# unconfigured entry here is skipped exactly like a down provider, not
+# an error.
 embedding_fallback_chain:
   - provider: ollama
     model: nomic-embed-text
@@ -28,6 +23,8 @@ embedding_fallback_chain:
     model: voyage-3-lite
   - provider: openai
     model: text-embedding-3-small
+  - provider: gemini
+    model: text-embedding-004
 
 departments:
   engineering:
@@ -55,6 +52,8 @@ departments:
         model: qwen2.5:14b
       - provider: ollama
         model: deepseek-r1:14b
+      - provider: gemini
+        model: gemini-2.5-flash
       - provider: openrouter
         model: meta-llama/llama-3.3-70b
 
@@ -62,5 +61,7 @@ departments:
     briefing_synthesis:
       - provider: claude
         model: claude-sonnet-4-6
+      - provider: gemini
+        model: gemini-2.5-flash
       - provider: ollama
         model: qwen2.5:14b

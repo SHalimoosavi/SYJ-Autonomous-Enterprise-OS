@@ -21,6 +21,7 @@ from app.core.database import AsyncSessionLocal, set_tenant_context
 from app.departments.registry import get_agent, list_departments
 from app.audit.service import record_audit
 from app.knowledge.vector_store import top_k
+from app.ratelimit.middleware import enforce_rate_limit
 
 DEFAULT_KNOWLEDGE_K = 3
 
@@ -63,6 +64,9 @@ async def invoke_department(request: Request):
         return JSONResponse({"detail": str(exc)}, status_code=401)
     except PermissionDenied as exc:
         return JSONResponse({"detail": str(exc)}, status_code=403)
+
+    if (rate_limited := await enforce_rate_limit(user.tenant_id, user.id, "department_invoke")) is not None:
+        return rate_limited
 
     body = await request.json() if request.headers.get("content-length", "0") != "0" else {}
     prompt = (body or {}).get("prompt", "").strip()

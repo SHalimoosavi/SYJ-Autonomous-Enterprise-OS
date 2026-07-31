@@ -82,6 +82,10 @@ class Settings:
     VECTOR_STORE_BACKEND: str = "memory"  # "memory" (Termux-safe default) or "pgvector" (production)
     VECTOR_DIMENSIONS: int = 768  # must match your embedding model's output size
 
+    # --- Phase 5: rate limiting ---
+    RATE_LIMIT_BACKEND: str = "memory"  # "memory" (Termux-safe default, per-process) or "redis" (production, shared)
+    RATE_LIMIT_REQUESTS_PER_MINUTE: int = 20  # per tenant+user, applied to AI-Gateway-calling endpoints
+
     @classmethod
     def from_env(cls) -> "Settings":
         _load_dotenv()

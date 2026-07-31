@@ -30,6 +30,7 @@ from app.departments.registry import get_agent
 from app.workflows.executor import execute_workflow_run
 from app.workflows.models import RunStatus, WorkflowRun
 from app.workflows.registry import get_workflow, list_workflows
+from app.ratelimit.middleware import enforce_rate_limit
 
 
 async def list_workflows_route(request: Request):
@@ -62,6 +63,9 @@ async def run_workflow(request: Request):
                 {"detail": f"Missing permission for step '{step.department}': {exc.permission_code}"},
                 status_code=403,
             )
+
+    if (rate_limited := await enforce_rate_limit(user.tenant_id, user.id, "workflow_run")) is not None:
+        return rate_limited
 
     body = await request.json() if request.headers.get("content-length", "0") != "0" else {}
     input_prompt = (body or {}).get("input", "").strip()

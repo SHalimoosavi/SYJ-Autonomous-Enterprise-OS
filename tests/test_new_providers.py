@@ -12,6 +12,7 @@ import pytest
 
 from app.ai_gateway.providers.openai_provider import OpenAIProvider
 from app.ai_gateway.providers.voyage_provider import VoyageProvider
+from app.ai_gateway.providers.gemini_provider import GeminiProvider
 from app.ai_gateway.providers.base import AIRequest
 
 
@@ -34,6 +35,12 @@ async def test_openai_health_check_reflects_key_presence():
     assert await OpenAIProvider(api_key="a-key").health_check() is True
 
 
+@pytest.mark.asyncio
+async def test_gemini_health_check_reflects_key_presence():
+    assert await GeminiProvider(api_key="").health_check() is False
+    assert await GeminiProvider(api_key="a-key").health_check() is True
+
+
 def test_gateway_only_registers_providers_with_keys_configured(monkeypatch):
     """The actual bug class from Phase 2 (a provider registered with a
     non-functional placeholder key) -- verified here for the two new
@@ -42,6 +49,7 @@ def test_gateway_only_registers_providers_with_keys_configured(monkeypatch):
     monkeypatch.setenv("VOYAGE_API_KEY", "")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "")
     monkeypatch.setenv("OPENROUTER_API_KEY", "")
+    monkeypatch.setenv("GEMINI_API_KEY", "")
 
     from app.core.config import get_settings
     get_settings.cache_clear()
@@ -54,6 +62,7 @@ def test_gateway_only_registers_providers_with_keys_configured(monkeypatch):
         assert "voyage" not in gateway._providers
         assert "claude" not in gateway._providers
         assert "openrouter" not in gateway._providers
+        assert "gemini" not in gateway._providers
     finally:
         get_settings.cache_clear()
 
@@ -61,6 +70,7 @@ def test_gateway_only_registers_providers_with_keys_configured(monkeypatch):
 def test_gateway_registers_openai_and_voyage_when_keys_present(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-fake-for-test")
     monkeypatch.setenv("VOYAGE_API_KEY", "voyage-fake-for-test")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-fake-for-test")
 
     from app.core.config import get_settings
     get_settings.cache_clear()
@@ -69,5 +79,6 @@ def test_gateway_registers_openai_and_voyage_when_keys_present(monkeypatch):
         gateway = build_default_gateway()
         assert "openai" in gateway._providers
         assert "voyage" in gateway._providers
+        assert "gemini" in gateway._providers
     finally:
         get_settings.cache_clear()

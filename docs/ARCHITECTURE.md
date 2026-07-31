@@ -431,10 +431,97 @@ re-verified: fresh venv, zero native compilation, all 9 migrations clean
 on SQLite, 80 tests passing (plus 2 correctly skipping without live
 infra), before any of the above infrastructure was ever touched.
 
-## 19. Next (Phase 5 preview)
+## 20. Phase 5 — Gemini provider, rate limiting, permission admin UI (complete)
 
-Gemini as a fourth generate() provider (settings field already exists,
-unused), a role/permission admin UI (currently API-only), rate limiting
-on the department invoke endpoint, and the remaining master-spec
-departments' deeper bespoke logic (only Executive Office has real
-`should_escalate` behavior beyond the generic department pattern).
+**Gemini provider** (`app/ai_gateway/providers/gemini_provider.py`):
+generate() + embed(), same pattern as every other provider, finally
+using `Settings.GEMINI_API_KEY` (present but unused since Phase 2).
+Added to `routing.yaml`'s embedding chain and as a fallback in
+`general_operations`/`executive_office`.
+
+**Rate limiting** (`app/ratelimit/`): `InMemoryRateLimiter` (Termux
+default, per-process) and `RedisRateLimiter` (production, shared across
+processes) behind a common interface, same shape as Phase 1's
+`EventBus`. Applied to the two endpoints that actually cost money --
+department invoke and workflow run -- not globally (health checks and
+DB-only dashboard reads aren't limited the same way). **Live-verified**
+against real Redis: two separate limiter instances sharing one counter
+correctly (the actual bug the Redis backend exists to fix over the
+in-memory default).
+
+A real, *reproducible* bug (not a one-off flake) surfaced during this
+phase's own testing: `InMemoryRateLimiter` originally aligned windows to
+absolute wall-clock boundaries (`now - (now % window_seconds)`), the
+same pattern `RedisRateLimiter` uses. A 20-request burst test failed
+roughly 1 run in 3-4 -- far too often to be the genuine rare edge case
+that pattern is normally associated with, which was the tell that
+something was actually wrong rather than "just flaky." Root cause: any
+burst landing near a wall-clock minute boundary resets mid-burst,
+letting through nearly double the intended limit for a moment -- and in
+a fast test suite firing 20 requests in well under a second, hitting
+*some* minute boundary across enough of the CI-like repeated runs isn't
+actually rare. Fixed by anchoring each key's window to that key's own
+first request instead of the wall clock, which removes the failure mode
+by construction. `RedisRateLimiter` keeps the absolute-boundary
+INCR+EXPIRE pattern deliberately (standard practice, O(1) Redis state)
+since its live tests never exercised a comparable rapid-fire burst;
+documented as a real, intentional difference between the two backends,
+not an inconsistency. The fix was verified by rerunning the full suite
+8 consecutive times with zero failures, not just re-running once and
+moving on.
+
+**Permission/role admin UI** (`app/admin/`): a server-rendered HTML
+dashboard (cookie-session login, forms for creating roles, assigning
+permissions, assigning roles to users) as an alternative to
+curl-scripting the JSON permission-management API. Built without adding
+Jinja2 as a dependency -- Jinja2 itself is pure Python, but its
+MarkupSafe dependency ships an optional C speedup extension, and this
+project's standing policy has been to avoid even "safe fallback"
+compiled dependencies when a small amount of plain code does the job;
+`app/admin/templates.py` is f-strings + `html.escape()` instead, with a
+test specifically confirming a role named `<script>...` renders escaped,
+not executed.
+
+Two real design points, not afterthoughts:
+- `app/auth/service.py`'s `authenticate()` and `app/permissions/service.py`
+  were extracted from the existing JSON routers specifically so the HTML
+  UI and the API call the *identical* tested logic -- verified by a test
+  that creates a role via the HTML form and confirms it's visible through
+  the JSON API in the same request-response cycle, not just "looks similar."
+- `get_current_user()` and `TenantContextMiddleware` were extended to
+  accept a session cookie as a fallback to the Bearer header/tenant
+  header respectively, with zero behavior change for existing API
+  clients -- verified by the full pre-existing suite passing unchanged
+  before any admin-specific tests were even written.
+
+A second real bug caught mid-development (not shipped): `login()`'s
+refactor initially called `set_tenant_context(session, tenant_slug)` --
+passing the tenant's *slug* where that function expects the *UUID*.
+Harmless no-op on SQLite (this project's default), silently wrong for
+live Postgres RLS. Caught and fixed by moving that call inside
+`authenticate()`, where the resolved UUID actually exists, before it
+was ever exercised against real Postgres.
+
+A third bug, caught by the very first admin UI test run: the tenant
+middleware's allowlist only exempted `/admin/login` from requiring
+tenant context, not `/admin` itself -- so an unauthenticated visit to
+the dashboard got a raw 400 from the middleware instead of the intended
+303 redirect to the login page. Fixed by widening the allowlist to the
+whole `/admin` prefix, since every route under it already handles its
+own auth/redirect logic.
+
+Full verification: fresh venv, zero native compilation (still --
+Jinja2/MarkupSafe were deliberately not added), all 9 migrations clean
+on SQLite, 97 tests passing (plus 4 correctly skipping without live
+infra) across 8 consecutive full-suite runs with zero flakes, and the
+Redis-backed rate limiter and Gemini registration logic live/unit
+verified per the standards above.
+
+## 21. Next (Phase 6 preview)
+
+Deeper bespoke `should_escalate` logic for departments beyond Executive
+Office (all 25 others currently share the generic pattern), a
+platform-admin cross-tenant view (currently `is_platform_admin` exists
+on the User model but has no dedicated UI/API surface of its own), and
+session/cookie hardening (CSRF protection on the admin UI's POST forms,
+currently relying on SameSite=Lax alone).

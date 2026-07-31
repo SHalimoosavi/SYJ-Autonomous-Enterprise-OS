@@ -19,6 +19,7 @@ from starlette.middleware import Middleware
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from app.admin.router import routes as admin_routes
 from app.api.v1.router import routes as api_v1_routes
 from app.core.config import get_settings
 from app.tenancy.middleware import TenantContextMiddleware
@@ -32,6 +33,6 @@ async def root_health(request):
 
 app = Starlette(
     debug=settings.DEBUG,
-    routes=[Route("/health", root_health), *api_v1_routes],
+    routes=[Route("/health", root_health), *api_v1_routes, *admin_routes],
     middleware=[Middleware(TenantContextMiddleware)],
 )

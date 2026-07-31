@@ -45,11 +45,19 @@ def require_permission(user: User, permission_code: str) -> None:
 
 
 async def get_current_user(request) -> User:
+    # Bearer header is the API's auth path (used by everything except the
+    # HTML admin UI). Falling back to a "saeos_session" cookie lets the
+    # exact same function -- same token validation, same tenant-match
+    # check, same DB lookup -- serve browser requests too, rather than a
+    # second parallel "who is this" implementation for app/admin/.
     auth_header = request.headers.get("authorization", "")
-    if not auth_header.lower().startswith("bearer "):
-        raise Unauthorized("Missing bearer token")
+    if auth_header.lower().startswith("bearer "):
+        token = auth_header.split(" ", 1)[1].strip()
+    else:
+        token = request.cookies.get("saeos_session")
+        if not token:
+            raise Unauthorized("Missing bearer token")
 
-    token = auth_header.split(" ", 1)[1].strip()
     payload = decode_access_token(token)
     if payload is None:
         raise Unauthorized("Invalid or expired token")

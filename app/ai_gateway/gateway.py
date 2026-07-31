@@ -19,6 +19,7 @@ from app.ai_gateway.providers.ollama_provider import OllamaProvider
 from app.ai_gateway.providers.openrouter_provider import OpenRouterProvider
 from app.ai_gateway.providers.openai_provider import OpenAIProvider
 from app.ai_gateway.providers.voyage_provider import VoyageProvider
+from app.ai_gateway.providers.gemini_provider import GeminiProvider
 from app.core.config import get_settings
 
 logger = structlog.get_logger()
@@ -99,7 +100,8 @@ def build_default_gateway() -> AIGateway:
         registry["openai"] = OpenAIProvider(api_key=settings.OPENAI_API_KEY)
     if settings.VOYAGE_API_KEY:
         registry["voyage"] = VoyageProvider(api_key=settings.VOYAGE_API_KEY)
-    # if settings.GEMINI_API_KEY: registry["gemini"] = GeminiProvider(...)
+    if settings.GEMINI_API_KEY:
+        registry["gemini"] = GeminiProvider(api_key=settings.GEMINI_API_KEY)
     return AIGateway(settings.AI_ROUTING_CONFIG_PATH, registry)
 
 

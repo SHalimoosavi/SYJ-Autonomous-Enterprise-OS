@@ -13,10 +13,10 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from app.auth.models import User
-from app.core.database import AsyncSessionLocal, set_tenant_context
-from app.core.security import create_access_token, hash_password, verify_password
+from app.auth.service import authenticate
+from app.core.database import AsyncSessionLocal
+from app.core.security import create_access_token, hash_password
 from app.tenancy.models import Tenant, TenantPlan, TenantStatus
-from app.tenancy.service import resolve_tenant_by_slug
 
 MIN_PASSWORD_LENGTH = 8
 
@@ -107,19 +107,9 @@ async def login(request: Request):
         return JSONResponse({"detail": "email and password are required"}, status_code=400)
 
     async with AsyncSessionLocal() as session:
-        tenant = await resolve_tenant_by_slug(session, tenant_slug)
-        if tenant is None:
-            # Same generic error as a bad password -- don't leak whether
-            # the tenant slug itself exists.
-            return JSONResponse({"detail": "Invalid email or password"}, status_code=401)
+        user = await authenticate(session, tenant_slug, email, password)
 
-        await set_tenant_context(session, tenant.id)
-        result = await session.execute(
-            select(User).where(User.tenant_id == tenant.id, User.email == email)
-        )
-        user = result.scalar_one_or_none()
-
-    if user is None or not verify_password(password, user.hashed_password):
+    if user is None:
         return JSONResponse({"detail": "Invalid email or password"}, status_code=401)
 
     token = create_access_token(subject=user.id, tenant_id=user.tenant_id)

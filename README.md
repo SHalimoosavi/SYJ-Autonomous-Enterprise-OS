@@ -1,4 +1,4 @@
-# SYJ Autonomous Enterprise OS (SAEOS) — Phase 1 → 4
+# SYJ Autonomous Enterprise OS (SAEOS) — Phase 1 → 5
 
 Multi-tenant, provider-agnostic AI Company Operating System.
 
@@ -7,9 +7,11 @@ Multi-tenant, provider-agnostic AI Company Operating System.
 - **Phase 2**: all 26 departments as callable agents, Approval Queue, audit logging, CEO Briefing.
 - **Phase 3**: RAG (pure-Python vector store), multi-department workflow engine, permission management.
 - **Phase 4**: async (Celery) workflow execution, OpenAI/Voyage embedding providers, pgvector, dashboard widgets (KPIs, sales pipeline, financials).
+- **Phase 5**: Gemini provider, rate limiting (in-memory + Redis), server-rendered permission/role admin UI.
 
 Built on **Starlette**, not FastAPI — see `docs/TERMUX.md` for why. No
-Pydantic, no Rust-based dependencies anywhere in the default install.
+Pydantic, no Rust-based dependencies anywhere in the default install
+(including the new admin UI — plain HTML, deliberately not Jinja2).
 
 ## Run in Termux (default path — unchanged since Phase 1)
 
@@ -87,6 +89,14 @@ curl -X POST localhost:8000/api/v1/dashboard/kpis \
 
 # 5. CEO briefing (real numbers: approvals, pipeline, finances + AI narrative if configured)
 curl localhost:8000/api/v1/dashboard/briefing -H "X-Tenant-ID: acme" -H "Authorization: Bearer <token>"
+
+# 6. Manage roles/permissions via the browser instead of curl
+open http://localhost:8000/admin/login
+# log in with your tenant slug, email, password from step 1 -- then create
+# roles, assign permissions, and assign roles to staff users from the page.
+
+# 7. Rate limiting (default: 20 requests/min per tenant+user on invoke/workflow endpoints)
+# hit it 21+ times in under a minute and you'll get a 429 with Retry-After: 60
 ```
 
 ## What's real vs. stubbed
@@ -99,12 +109,15 @@ curl localhost:8000/api/v1/dashboard/briefing -H "X-Tenant-ID: acme" -H "Authori
 | pgvector production backend | **Live-verified** against real Postgres+pgvector (see docs/ARCHITECTURE.md §18) |
 | Workflow engine (sync, default) | Working, tested |
 | Workflow engine (async, Celery+Redis, opt-in) | **Live-verified** against a real Celery worker process (see docs/ARCHITECTURE.md §18) |
+| Rate limiting (in-memory, default) | Working, tested — includes a real reproducible bug found+fixed in Phase 5 (see docs/ARCHITECTURE.md §20) |
+| Rate limiting (Redis, production) | **Live-verified** against real Redis (see docs/ARCHITECTURE.md §20) |
 | Permission management: roles, catalog, assignment | Working, tested |
+| Permission/role admin UI (HTML, cookie-session) | Working, tested — shares the exact same service layer as the JSON API |
 | Dashboard: KPIs, sales pipeline, financial summary | Working, tested |
 | Tenant middleware, auth, RBAC, audit logging, Approval Queue | Working, tested |
 | Postgres row-level security | **Live-verified** on real Postgres (a bug meant this was never actually true before Phase 4 — see docs/ARCHITECTURE.md §18) |
-| Anthropic / Ollama / OpenRouter / OpenAI / Voyage providers | Registration logic tested; real network calls need real API keys |
-| Event bus (Redis), Gemini provider | Stubbed/unused — Phase 5 |
+| Anthropic / Ollama / OpenRouter / OpenAI / Voyage / Gemini providers | Registration logic tested; real network calls need real API keys |
+| Event bus (Redis) | Stubbed — Production Deployment only |
 
 See `docs/ARCHITECTURE.md` for the full design doc (all phases) and
 `docs/TERMUX.md` for platform compatibility notes and the install-failure
