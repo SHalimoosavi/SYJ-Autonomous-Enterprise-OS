@@ -14,6 +14,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse
 from starlette.routing import Route
 
+from app.admin.csrf import CSRF_COOKIE, generate_csrf_token, verify_csrf
 from app.admin.templates import render_dashboard, render_login_page
 from app.auth.rbac import Unauthorized, get_current_user
 from app.auth.service import authenticate
@@ -53,13 +54,17 @@ async def login_submit(request: Request):
     response = RedirectResponse(url="/admin", status_code=303)
     response.set_cookie(SESSION_COOKIE, token, max_age=COOKIE_MAX_AGE, httponly=True, samesite="lax")
     response.set_cookie(TENANT_COOKIE, tenant_slug, max_age=COOKIE_MAX_AGE, httponly=True, samesite="lax")
+    response.set_cookie(CSRF_COOKIE, generate_csrf_token(), max_age=COOKIE_MAX_AGE, httponly=True, samesite="lax")
     return response
 
 
 async def logout(request: Request):
+    if not await verify_csrf(request):
+        return HTMLResponse("CSRF check failed. Please try again from the admin page.", status_code=403)
     response = RedirectResponse(url="/admin/login", status_code=303)
     response.delete_cookie(SESSION_COOKIE)
     response.delete_cookie(TENANT_COOKIE)
+    response.delete_cookie(CSRF_COOKIE)
     return response
 
 
@@ -97,6 +102,7 @@ async def dashboard(request: Request):
                 {"id": u.id, "email": u.email, "is_tenant_owner": u.is_tenant_owner, "roles": [r.name for r in u.roles]}
                 for u in users
             ],
+            csrf_token=request.cookies.get(CSRF_COOKIE, ""),
         )
     )
 
@@ -105,6 +111,8 @@ async def create_role_submit(request: Request):
     user = await _current_admin_or_redirect(request)
     if isinstance(user, RedirectResponse):
         return user
+    if not await verify_csrf(request):
+        return HTMLResponse("CSRF check failed. Please go back to the admin page and try again.", status_code=403)
 
     form = await request.form()
     name = (form.get("name") or "").strip()
@@ -120,6 +128,8 @@ async def assign_permission_submit(request: Request):
     user = await _current_admin_or_redirect(request)
     if isinstance(user, RedirectResponse):
         return user
+    if not await verify_csrf(request):
+        return HTMLResponse("CSRF check failed. Please go back to the admin page and try again.", status_code=403)
 
     role_id = request.path_params["role_id"]
     form = await request.form()
@@ -140,6 +150,8 @@ async def assign_role_submit(request: Request):
     user = await _current_admin_or_redirect(request)
     if isinstance(user, RedirectResponse):
         return user
+    if not await verify_csrf(request):
+        return HTMLResponse("CSRF check failed. Please go back to the admin page and try again.", status_code=403)
 
     target_user_id = request.path_params["user_id"]
     form = await request.form()

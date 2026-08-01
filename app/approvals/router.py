@@ -10,6 +10,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from app.approvals import service
 from app.approvals.models import ApprovalRequest, ApprovalStatus
 from app.audit.service import record_audit
 from app.auth.rbac import Unauthorized, get_current_user
@@ -32,21 +33,13 @@ async def create_approval(request: Request):
 
     async with AsyncSessionLocal() as session:
         await set_tenant_context(session, user.tenant_id)
-        approval = ApprovalRequest(
-            tenant_id=user.tenant_id,
-            department=department,
-            title=title,
-            description=description,
-            requested_by=user.id,
-        )
-        session.add(approval)
-        await session.commit()
-        await session.refresh(approval)
+        approval = await service.create_approval(session, user.tenant_id, department, title, description, user.id)
         await record_audit(session, user.tenant_id, user.id, "approval.created", resource=approval.id)
 
     return JSONResponse(
         {"id": approval.id, "title": approval.title, "status": approval.status.value}, status_code=201
     )
+
 
 
 async def list_approvals(request: Request):

@@ -11,6 +11,11 @@ the pure-Python cosine path that the rest of the suite exercises.
 To run: start Postgres with the vector extension, apply migrations with
 DATABASE_URL pointed at it and VECTOR_STORE_BACKEND=pgvector, then:
     PGVECTOR_TEST_DATABASE_URL=postgresql+asyncpg://... pytest tests/test_pgvector_live.py -v
+Uses a unique tenant slug per run, so no manual cleanup is needed between
+runs, and connecting as a non-superuser application role (the realistic
+production setup -- see docs/ARCHITECTURE.md's Phase 6 section on why
+this matters for RLS specifically) works without any extra GRANT beyond
+normal table SELECT/INSERT/UPDATE/DELETE.
 """
 import os
 
@@ -42,23 +47,36 @@ async def test_pgvector_top_k_ranks_correctly_against_real_postgres():
     get_settings.cache_clear()
 
     from sqlalchemy import text
-    from app.core.database import AsyncSessionLocal, engine
+    from app.core.database import AsyncSessionLocal, engine, set_tenant_context
     from app.knowledge.models import KnowledgeChunk
     from app.knowledge.vector_store import top_k, _vector_literal
     from app.tenancy.models import Tenant, TenantPlan, TenantStatus
 
     assert engine.dialect.name == "postgresql", "This test requires a real Postgres DATABASE_URL"
 
-    async with engine.begin() as conn:
-        await conn.execute(text("DELETE FROM knowledge_chunks"))
-        await conn.execute(text("DELETE FROM tenants"))
+    # Deliberately no upfront `DELETE FROM knowledge_chunks`/`DELETE FROM
+    # tenants` cleanup here: under genuine (non-superuser) RLS enforcement
+    # those unscoped deletes would themselves need elevated privileges,
+    # which is a reasonable thing to require of a one-off admin/maintenance
+    # connection but not of this test. Use a fresh database per run
+    # instead (see the module docstring's run instructions), and a unique
+    # slug so repeated runs against the same database don't collide.
+    import uuid
+    slug = f"pgvec-live-{uuid.uuid4().hex[:8]}"
 
     async with AsyncSessionLocal() as session:
-        tenant = Tenant(name="PGVec Test", slug="pgvec-live-test",
+        tenant = Tenant(name="PGVec Test", slug=slug,
                          plan=TenantPlan.SUBSCRIPTION_STARTER, status=TenantStatus.TRIAL)
         session.add(tenant)
         await session.flush()
         tenant_id = tenant.id
+
+        # Set RLS context now that the tenant exists -- required for the
+        # KnowledgeChunk INSERTs below under genuine (non-superuser) RLS
+        # enforcement. A real gap this test had until Phase 6: it worked
+        # "fine" every earlier time only because it ran against a
+        # superuser connection, which bypasses RLS unconditionally.
+        await set_tenant_context(session, tenant_id)
 
         for content, emb in [
             ("Refunds are processed within 30 days.", _make_vec(1.0)),
@@ -75,6 +93,8 @@ async def test_pgvector_top_k_ranks_correctly_against_real_postgres():
             )
         await session.commit()
 
+    async with AsyncSessionLocal() as session:
+        await set_tenant_context(session, tenant_id)
         results = await top_k(session, tenant_id, _make_vec(1.0), k=3)
 
     assert len(results) == 3

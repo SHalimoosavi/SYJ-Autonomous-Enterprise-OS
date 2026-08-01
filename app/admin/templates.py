@@ -16,6 +16,13 @@ def esc(value) -> str:
     return html.escape(str(value), quote=True)
 
 
+def csrf_field(csrf_token: str) -> str:
+    """Hidden input embedding the CSRF token into a rendered form -- see
+    app/admin/csrf.py's module docstring for the double-submit-cookie
+    pattern this is half of."""
+    return f'<input type="hidden" name="csrf_token" value="{esc(csrf_token)}">'
+
+
 PAGE_SHELL = """<!DOCTYPE html>
 <html>
 <head>
@@ -58,7 +65,8 @@ def render_login_page(error: str | None = None) -> str:
     return PAGE_SHELL.format(title="SAEOS Admin — Log in", body=body)
 
 
-def render_dashboard(tenant_name: str, roles: list[dict], permissions: list[dict], users: list[dict]) -> str:
+def render_dashboard(tenant_name: str, roles: list[dict], permissions: list[dict], users: list[dict], csrf_token: str) -> str:
+    csrf = csrf_field(csrf_token)
     permission_options = "".join(f'<option value="{esc(p["code"])}">{esc(p["code"])}</option>' for p in permissions)
 
     roles_rows = "".join(
@@ -67,6 +75,7 @@ def render_dashboard(tenant_name: str, roles: list[dict], permissions: list[dict
           <td>{esc(', '.join(r['permissions']) or '—')}</td>
           <td>
             <form class="inline" method="post" action="/admin/roles/{esc(r['id'])}/permissions">
+              {csrf}
               <select name="permission_code">{permission_options}</select>
               <button type="submit">Add permission</button>
             </form>
@@ -82,6 +91,7 @@ def render_dashboard(tenant_name: str, roles: list[dict], permissions: list[dict
           <td>{esc(', '.join(u['roles']) or '—')}</td>
           <td>
             {'' if u['is_tenant_owner'] else f'''<form class="inline" method="post" action="/admin/users/{esc(u["id"])}/roles">
+              {csrf}
               <select name="role_id">{role_options}</select>
               <button type="submit">Assign role</button>
             </form>'''}
@@ -92,11 +102,12 @@ def render_dashboard(tenant_name: str, roles: list[dict], permissions: list[dict
 
     body = f"""
 <h1>{esc(tenant_name)} — Admin</h1>
-<form method="post" action="/admin/logout" class="inline"><button type="submit">Log out</button></form>
+<form method="post" action="/admin/logout" class="inline">{csrf}<button type="submit">Log out</button></form>
 
 <h2>Roles</h2>
 <div class="card">
   <form method="post" action="/admin/roles/create">
+    {csrf}
     <input name="name" placeholder="New role name" required>
     <button type="submit">Create role</button>
   </form>

@@ -56,7 +56,9 @@ async def create_role(session, tenant_id: str, actor_id: str, name: str) -> Role
     role = Role(tenant_id=tenant_id, name=name)
     session.add(role)
     await session.commit()
-    await session.refresh(role)
+    # No refresh(): Role has no server-generated columns (id is a
+    # client-side UUID default), and record_audit() below now sets its
+    # own tenant context regardless -- see app/audit/service.py.
     await record_audit(session, tenant_id, actor_id, "role.created", resource=role.id, metadata={"name": name})
     return role
 

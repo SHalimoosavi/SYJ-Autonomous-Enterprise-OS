@@ -54,7 +54,8 @@ async def record_kpi(request: Request):
         metric = KPIMetric(tenant_id=user.tenant_id, department=department, metric_name=metric_name, value=value)
         session.add(metric)
         await session.commit()
-        await session.refresh(metric)
+        # No refresh(): metric.id is a client-side UUID default; response
+        # below uses no server-generated field.
         await record_audit(session, user.tenant_id, user.id, "kpi.recorded", resource=metric.id,
                             metadata={"metric_name": metric_name, "value": value})
 
@@ -109,7 +110,7 @@ async def create_deal(request: Request):
                           notes=(body or {}).get("notes", ""))
         session.add(deal)
         await session.commit()
-        await session.refresh(deal)
+        # No refresh(): deal.id is a client-side UUID default.
         await record_audit(session, user.tenant_id, user.id, "deal.created", resource=deal.id)
 
     return JSONResponse({"id": deal.id, "name": deal.name, "stage": deal.stage.value, "value": float(deal.value)}, status_code=201)
@@ -201,7 +202,7 @@ async def record_transaction(request: Request):
                                     description=(body or {}).get("description", ""))
         session.add(txn)
         await session.commit()
-        await session.refresh(txn)
+        # No refresh(): txn.id is a client-side UUID default.
         await record_audit(session, user.tenant_id, user.id, "transaction.recorded", resource=txn.id,
                             metadata={"type": txn_type.value, "amount": amount})
 

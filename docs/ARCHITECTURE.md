@@ -517,11 +517,147 @@ infra) across 8 consecutive full-suite runs with zero flakes, and the
 Redis-backed rate limiter and Gemini registration logic live/unit
 verified per the standards above.
 
-## 21. Next (Phase 6 preview)
+## 22. Phase 6 — escalation logic, platform-admin cross-tenant view, CSRF hardening (complete)
 
-Deeper bespoke `should_escalate` logic for departments beyond Executive
-Office (all 25 others currently share the generic pattern), a
-platform-admin cross-tenant view (currently `is_platform_admin` exists
-on the User model but has no dedicated UI/API surface of its own), and
-session/cookie hardening (CSRF protection on the admin UI's POST forms,
-currently relying on SameSite=Lax alone).
+This phase found more genuine, previously-invisible bugs than any prior
+phase, almost all of them because it was the first time a full HTTP
+request was ever driven against Postgres **connected as a real,
+non-superuser application role**. Every earlier phase's "live Postgres"
+verification, without realizing it, ran as the `postgres` superuser --
+and Postgres superusers bypass row-level security unconditionally,
+regardless of `FORCE ROW LEVEL SECURITY`. That single fact means RLS
+had never actually been exercised end-to-end before this phase, only
+schema-inspected or exercised in isolation from the parts of the
+request path that touch it. This section documents what actually
+shipped and, in detail, what was found and fixed -- the same standard
+applied throughout this project, not softened because the list is long.
+
+### Escalation logic
+
+`EscalationRule`/`should_escalate()` existed since Phase 1 as a declared
+interface with **zero callers** -- a real, if quiet, gap: a designed
+safety feature that had never been wired to anything. Fixed by:
+- `AgentCapability.escalation_rules` gained real, differentiated
+  `trigger_keywords` per department (Finance: payment/invoice/refund;
+  HR: hire/fire/terminate; Engineering: production/deploy/drop table;
+  Investor Relations: `ALWAYS_ESCALATE`, matching its "never sends
+  anything externally without founder approval" mission) instead of the
+  same two generic conditions copy-pasted 25 times.
+- `DepartmentAgent.should_escalate()` got a real default implementation:
+  case-insensitive keyword matching against the combined prompt+response
+  text. Deliberately not a second AI call to "judge" escalation --
+  free, deterministic, fully testable without any provider configured.
+- `app/api/v1/departments_router.py`'s invoke handler now actually calls
+  `should_escalate()` after a successful response and, on a match,
+  creates a real `ApprovalRequest` via the Phase 2 Approval Queue
+  (`app/approvals/service.py`, extracted from router-inline code so both
+  the human-initiated and AI-escalated paths create approvals identically),
+  audit-logs it, and returns `escalated`/`escalation` in the response.
+
+### Platform-admin cross-tenant view
+
+`is_platform_admin` existed on `User` since Phase 1.1 with no dedicated
+surface. New `app/platform/` module: `GET /api/v1/platform/tenants`,
+`GET /api/v1/platform/tenants/{id}`, `GET /api/v1/platform/stats`, all
+platform-admin-only, all querying without a tenant_id filter (the whole
+point) via a new `set_platform_admin_context()` alongside a migration
+that updates every RLS policy to add an `OR
+current_setting('app.is_platform_admin', true) = 'true'` bypass clause.
+
+### The bug chain this phase found (in the order discovered)
+
+1. **`set_tenant_context()` used invalid SQL.** `SET LOCAL app.x = :y` is
+   not valid Postgres syntax -- `SET` does not accept bind parameters in
+   that position at all. Every call would have raised a syntax error
+   against a real server. Undetected because no earlier live test drove
+   a full HTTP request through `get_current_user()` on Postgres. Fixed
+   with `set_config('app.current_tenant_id', :tenant_id, true)`, the
+   correct parameterized equivalent.
+2. **The `is_platform_admin` bypass flag leaked across requests.**
+   Discovered via a deliberately rigorous negative-control test (proving
+   isolation still holds for non-admin sessions, not just that the admin
+   view works) that initially failed: a normal tenant-scoped session
+   could see another tenant's row. Root cause never fully isolated in
+   pooled-connection terms; fixed defensively by having
+   `set_tenant_context()` explicitly reset `app.is_platform_admin` to
+   `'false'` on every call, rather than trusting transaction boundaries
+   alone to clear it.
+3. **Superusers bypass RLS unconditionally.** `FORCE ROW LEVEL SECURITY`
+   only overrides the table-owner exemption, never the superuser/
+   `BYPASSRLS` exemption -- confirmed via `pg_roles`. This is the
+   discovery that reframed everything above: connecting as `postgres`
+   (as every earlier phase's live tests did) means RLS was never
+   actually enforced, full stop, regardless of policy correctness. Fixed
+   the *testing methodology*, not application code: created a genuine
+   `saeos_app` role (`NOSUPERUSER NOBYPASSRLS`) and re-ran every RLS-
+   dependent live test against it. **This is now the documented,
+   required production setup** -- see docs/TERMUX.md.
+4. **`register()` never set tenant context before inserting the new
+   User.** Invisible until testing against the genuine non-superuser
+   role: the INSERT's `WITH CHECK` clause requires
+   `current_setting('app.current_tenant_id')` to already equal the new
+   tenant's id, which was never set for a brand-new tenant. Fixed by
+   calling `set_tenant_context(session, tenant.id)` immediately after
+   `session.flush()` populates the new tenant's id, before the User
+   INSERT.
+5. **`is_local=true` (`SET LOCAL` semantics) resets at every `COMMIT`,
+   and several handlers called `record_audit()` -- or, in one case, a
+   raw `embedding_vector` UPDATE -- *after* their own commit,** by which
+   point the earlier `set_tenant_context()` call in the same session had
+   already stopped applying. Under genuine RLS this doesn't error for
+   an UPDATE (it silently matches zero rows) but does error for an
+   INSERT's `WITH CHECK` (audit log writes would fail outright). Fixed
+   systemically: `record_audit()` now sets its own tenant context
+   immediately before its own commit, rather than trusting the caller's
+   earlier call to still be in effect -- this fixed every one of its
+   ~10 call sites at once. The one non-`record_audit` case (knowledge
+   ingest's `embedding_vector` UPDATE) got the same fix inline. Six
+   unnecessary `session.refresh()` calls (also post-commit, also
+   RLS-affected, and returning no data any caller actually used) were
+   removed rather than fixed, since they served no purpose.
+6. **Two live test files had the identical class of bug in their own
+   setup code** (`test_pgvector_live.py`'s manual chunk inserts,
+   `test_platform_admin_live.py`'s manual `is_platform_admin` grant) --
+   both written before this phase's RLS understanding, both silently
+   "worked" only because they too ran as the superuser. Fixed the same
+   way as application code: call `set_tenant_context()` before any
+   RLS-protected write.
+
+Every fix above was verified by re-running the affected live test
+against the genuine `saeos_app` role until it passed for the right
+reason -- not by inspecting the code and assuming correctness. The
+`test_pgvector_live.py` and `test_rls_live.py` "passing" results
+reported in Phases 4 and 6-early were real in the sense that the code
+ran without erroring, but did not actually prove tenant isolation, only
+schema/query correctness under a role that bypasses the very thing
+being tested. That distinction is worth stating plainly rather than
+letting the earlier phase summaries stand unqualified.
+
+### CSRF hardening
+
+Double-submit-cookie pattern (`app/admin/csrf.py`): a random token set
+as an httponly cookie at login, embedded directly into every
+server-rendered form as a hidden field (no JS needed -- the server
+already knows the value it just set), compared with
+`hmac.compare_digest` on every POST. Every state-changing admin route
+(create role, assign permission, assign role, logout) now requires a
+matching token. Tested including the actual attack CSRF protection
+exists to prevent: a token valid for a *different* logged-in session
+does not work against another user's session.
+
+Full verification for this phase: fresh venv, zero native compilation
+(unchanged), 119 tests passing (6 correctly skipping without live
+infra) on SQLite, plus every RLS-dependent live test re-verified against
+a genuine non-superuser Postgres role, not the superuser connection
+every earlier phase unknowingly relied on.
+
+## 23. Next (Phase 7 preview)
+
+A documented, scripted way to provision the `saeos_app`-equivalent
+non-superuser role and grants as part of the standard Postgres
+deployment process (currently a manual `GRANT` sequence run ad hoc
+during this phase's testing, not yet codified anywhere a real deployment
+would run it), Gemini's `should_escalate` equivalent for workflow-level
+(not just single-invoke) escalation, and audit-log immutability
+(currently a plain table with no `UPDATE`/`DELETE` revocation at the DB
+level, noted as a gap back in Phase 1's security review and still open).

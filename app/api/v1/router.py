@@ -14,6 +14,7 @@ from app.dashboard.router import routes as dashboard_routes
 from app.knowledge.router import routes as knowledge_routes
 from app.workflows.router import routes as workflow_routes
 from app.permissions.router import routes as permission_routes
+from app.platform.router import routes as platform_routes
 
 
 async def health(request):
@@ -45,4 +46,5 @@ routes = [
     *knowledge_routes,
     *workflow_routes,
     *permission_routes,
+    *platform_routes,
 ]

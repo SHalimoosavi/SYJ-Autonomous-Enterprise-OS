@@ -16,6 +16,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from app.ai_gateway.gateway import AllProvidersFailedError, get_gateway
+from app.approvals import service as approval_service
 from app.auth.rbac import PermissionDenied, Unauthorized, get_current_user, require_permission
 from app.core.database import AsyncSessionLocal, set_tenant_context
 from app.departments.registry import get_agent, list_departments
@@ -83,6 +84,7 @@ async def invoke_department(request: Request):
         # or Ollama isn't running -- not a bug. 503, not 500. Covers both
         # the generation call and (if use_knowledge) the embedding call.
         async with AsyncSessionLocal() as session:
+            await set_tenant_context(session, user.tenant_id)
             await record_audit(
                 session, user.tenant_id, user.id, f"{department_slug}.invoke_failed",
                 resource=department_slug, metadata={"error": str(exc), "use_knowledge": use_knowledge},
@@ -93,14 +95,42 @@ async def invoke_department(request: Request):
         )
 
     async with AsyncSessionLocal() as session:
+        await set_tenant_context(session, user.tenant_id)
         await record_audit(
             session, user.tenant_id, user.id, f"{department_slug}.invoke",
             resource=department_slug,
             metadata={"provider": response.provider, "model": response.model, "use_knowledge": use_knowledge},
         )
 
+    # Automatic escalation: check the department's rules (see
+    # app/departments/registry.py and app/departments/base/agent.py's
+    # should_escalate) against the combined prompt+response text. This is
+    # what turns EscalationRule from a declared-but-inert design into an
+    # actual safety behavior -- a match creates a real ApprovalRequest
+    # (the same Approval Queue a human uses) rather than letting the
+    # department's response stand as if the founder had signed off on it.
+    escalation_info = None
+    matched_rule = agent.should_escalate({"text": f"{prompt}\n{response.text}"})
+    if matched_rule is not None:
+        async with AsyncSessionLocal() as session:
+            await set_tenant_context(session, user.tenant_id)
+            approval = await approval_service.create_approval(
+                session, user.tenant_id, department_slug,
+                title=f"[{department_slug}] {prompt[:150]}",
+                description=f"AI response:\n{response.text}\n\nEscalation reason: {matched_rule.condition}",
+                requested_by=f"agent:{department_slug}",
+            )
+            await record_audit(
+                session, user.tenant_id, user.id, f"{department_slug}.escalated",
+                resource=approval.id, metadata={"reason": matched_rule.condition, "escalate_to": matched_rule.escalate_to},
+            )
+        escalation_info = {"approval_id": approval.id, "reason": matched_rule.condition, "escalate_to": matched_rule.escalate_to}
+
     return JSONResponse(
-        {"department": department_slug, "provider": response.provider, "model": response.model, "response": response.text}
+        {
+            "department": department_slug, "provider": response.provider, "model": response.model,
+            "response": response.text, "escalated": escalation_info is not None, "escalation": escalation_info,
+        }
     )
 
 

@@ -1,4 +1,4 @@
-# SYJ Autonomous Enterprise OS (SAEOS) — Phase 1 → 5
+# SYJ Autonomous Enterprise OS (SAEOS) — Phase 1 → 6
 
 Multi-tenant, provider-agnostic AI Company Operating System.
 
@@ -8,10 +8,17 @@ Multi-tenant, provider-agnostic AI Company Operating System.
 - **Phase 3**: RAG (pure-Python vector store), multi-department workflow engine, permission management.
 - **Phase 4**: async (Celery) workflow execution, OpenAI/Voyage embedding providers, pgvector, dashboard widgets (KPIs, sales pipeline, financials).
 - **Phase 5**: Gemini provider, rate limiting (in-memory + Redis), server-rendered permission/role admin UI.
+- **Phase 6**: real escalation logic (wired to the Approval Queue), platform-admin cross-tenant view, CSRF hardening, and a chain of serious RLS bugs found + fixed by finally testing against a genuine non-superuser Postgres role.
+
+**⚠️ If you're deploying to Postgres, read `docs/TERMUX.md`'s
+"Production Deployment tasks" section before going further.** Phase 6
+found that Postgres superusers bypass row-level security
+unconditionally — connecting as `postgres` silently defeats every
+tenant-isolation guarantee this project's RLS migrations provide. A
+dedicated non-superuser role is required, not optional.
 
 Built on **Starlette**, not FastAPI — see `docs/TERMUX.md` for why. No
-Pydantic, no Rust-based dependencies anywhere in the default install
-(including the new admin UI — plain HTML, deliberately not Jinja2).
+Pydantic, no Rust-based dependencies anywhere in the default install.
 
 ## Run in Termux (default path — unchanged since Phase 1)
 
@@ -97,6 +104,18 @@ open http://localhost:8000/admin/login
 
 # 7. Rate limiting (default: 20 requests/min per tenant+user on invoke/workflow endpoints)
 # hit it 21+ times in under a minute and you'll get a 429 with Retry-After: 60
+
+# 8. Escalation: some prompts automatically create an Approval Queue entry
+curl -X POST localhost:8000/api/v1/departments/engineering/invoke \
+  -H "X-Tenant-ID: acme" -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -d '{"prompt":"Deploy this to production right now"}'
+# -> {"escalated": true, "escalation": {"approval_id": "...", "reason": "..."}, ...}
+
+# 9. Platform admin cross-tenant view (needs is_platform_admin=true, granted
+#    via direct DB update by you as the operator -- there is deliberately
+#    no API to self-grant this)
+curl localhost:8000/api/v1/platform/tenants -H "X-Tenant-ID: acme" -H "Authorization: Bearer <token>"
+curl localhost:8000/api/v1/platform/stats -H "X-Tenant-ID: acme" -H "Authorization: Bearer <token>"
 ```
 
 ## What's real vs. stubbed
@@ -105,20 +124,21 @@ open http://localhost:8000/admin/login
 |---|---|
 | AI Gateway (generate + embed) + provider fallback chain | Working, tested |
 | All 26 departments, generic invoke endpoint | Working, tested |
+| Escalation logic (keyword-triggered, auto-creates Approval Queue entries) | Working, tested — see docs/ARCHITECTURE.md §22 for why this was previously dead code |
 | RAG: ingest/query, opt-in retrieval augmentation | Working, tested |
-| pgvector production backend | **Live-verified** against real Postgres+pgvector (see docs/ARCHITECTURE.md §18) |
+| pgvector production backend | **Live-verified** against real Postgres+pgvector, as a genuine non-superuser role (see docs/ARCHITECTURE.md §22) |
 | Workflow engine (sync, default) | Working, tested |
-| Workflow engine (async, Celery+Redis, opt-in) | **Live-verified** against a real Celery worker process (see docs/ARCHITECTURE.md §18) |
-| Rate limiting (in-memory, default) | Working, tested — includes a real reproducible bug found+fixed in Phase 5 (see docs/ARCHITECTURE.md §20) |
-| Rate limiting (Redis, production) | **Live-verified** against real Redis (see docs/ARCHITECTURE.md §20) |
+| Workflow engine (async, Celery+Redis, opt-in) | **Live-verified** against a real Celery worker process |
+| Rate limiting (in-memory default / Redis production) | Working, tested; Redis path **live-verified** |
 | Permission management: roles, catalog, assignment | Working, tested |
-| Permission/role admin UI (HTML, cookie-session) | Working, tested — shares the exact same service layer as the JSON API |
+| Permission/role admin UI (HTML, cookie-session, CSRF-protected) | Working, tested — including a simulated cross-session CSRF attack |
+| Platform-admin cross-tenant view | **Live-verified** against genuine (non-superuser) Postgres RLS enforcement (see docs/ARCHITECTURE.md §22) |
 | Dashboard: KPIs, sales pipeline, financial summary | Working, tested |
 | Tenant middleware, auth, RBAC, audit logging, Approval Queue | Working, tested |
-| Postgres row-level security | **Live-verified** on real Postgres (a bug meant this was never actually true before Phase 4 — see docs/ARCHITECTURE.md §18) |
+| Postgres row-level security | **Live-verified against a genuine non-superuser role in Phase 6** — a chain of real bugs (including that superusers bypass RLS entirely) meant this was never actually proven before, despite passing tests in earlier phases. See docs/ARCHITECTURE.md §22 for the full account. |
 | Anthropic / Ollama / OpenRouter / OpenAI / Voyage / Gemini providers | Registration logic tested; real network calls need real API keys |
 | Event bus (Redis) | Stubbed — Production Deployment only |
 
 See `docs/ARCHITECTURE.md` for the full design doc (all phases) and
-`docs/TERMUX.md` for platform compatibility notes and the install-failure
-fix history.
+`docs/TERMUX.md` for platform compatibility notes, the install-failure
+fix history, and the **required non-superuser Postgres role setup**.

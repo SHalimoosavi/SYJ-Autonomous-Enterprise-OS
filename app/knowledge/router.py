@@ -52,7 +52,7 @@ async def ingest(request: Request):
         )
         session.add(chunk)
         await session.commit()
-        await session.refresh(chunk)
+        # No refresh(): chunk.id is a client-side UUID default.
 
         # Also populate the native pgvector column for fast search, when
         # running against Postgres with the pgvector migration applied.
@@ -60,6 +60,15 @@ async def ingest(request: Request):
         # portable copy; this is purely a production performance path.
         if engine.dialect.name == "postgresql" and settings.VECTOR_STORE_BACKEND == "pgvector":
             from sqlalchemy import text
+            # Re-set tenant context: the commit() above already reset the
+            # is_local=true setting from set_tenant_context() at the top
+            # of this function, and this UPDATE runs in a new implicit
+            # transaction. Without this, RLS's USING clause would filter
+            # this statement to zero matching rows (a silent no-op, not
+            # an error) rather than actually setting embedding_vector --
+            # caught live-testing against genuine (non-superuser) RLS
+            # enforcement in Phase 6, same root cause as record_audit's fix.
+            await set_tenant_context(session, user.tenant_id)
             await session.execute(
                 text("UPDATE knowledge_chunks SET embedding_vector = :vec WHERE id = :id"),
                 {"vec": _vector_literal(embedding), "id": chunk.id},

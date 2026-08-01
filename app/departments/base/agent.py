@@ -11,11 +11,23 @@ from dataclasses import dataclass, field
 from app.ai_gateway.gateway import AIGateway
 from app.ai_gateway.providers.base import AIRequest, AIResponse
 
+ALWAYS_ESCALATE = "*"  # sentinel trigger_keywords value meaning "every invocation"
+
 
 @dataclass
 class EscalationRule:
-    condition: str          # human-readable trigger, e.g. "spend > $1000"
+    condition: str          # human-readable trigger, e.g. "spend > $1000" -- shown to the founder in the approval
     escalate_to: str = "ceo"
+    # Keyword match against the combined prompt+response text (lowercased,
+    # substring match). ALWAYS_ESCALATE ("*") means every invocation of
+    # this department escalates regardless of content -- used for
+    # departments where the master spec says "never sends anything
+    # externally without founder approval" rather than a content-based
+    # trigger (e.g. Investor Relations). See DepartmentAgent.should_escalate
+    # for how this is evaluated; this is what turned the previously-inert
+    # EscalationRule/should_escalate design from Phase 1 into something
+    # actually wired to app/api/v1/departments_router.py's invoke handler.
+    trigger_keywords: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -43,7 +55,29 @@ class DepartmentAgent(ABC):
         )
 
     def should_escalate(self, context: dict) -> EscalationRule | None:
-        """Override per-agent with real logic; base returns None (no escalation)."""
+        """
+        Default, data-driven escalation: checks context["text"] (expected
+        to be the prompt + response, combined by the caller) against each
+        rule's trigger_keywords, case-insensitive substring match. Returns
+        the first matching rule, or None if nothing matches.
+
+        This is deliberately keyword-based rather than a second AI call
+        to "judge" whether escalation is warranted: it's fast, free,
+        fully deterministic, and testable without any AI provider being
+        configured -- all real properties a safety-relevant check should
+        have. It will have false negatives (a risky request phrased
+        without any trigger word) and the occasional false positive
+        (an incidental keyword match) -- a known, accepted tradeoff for
+        a first pass, not a claim of perfect judgment. Subclasses (see
+        ExecutiveOfficeAgent) can still override this entirely for
+        genuinely custom logic beyond keyword matching.
+        """
+        text = (context.get("text") or "").lower()
+        for rule in self.capability.escalation_rules:
+            if ALWAYS_ESCALATE in rule.trigger_keywords:
+                return rule
+            if any(keyword.lower() in text for keyword in rule.trigger_keywords):
+                return rule
         return None
 
 

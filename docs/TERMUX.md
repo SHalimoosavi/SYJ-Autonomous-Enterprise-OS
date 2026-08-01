@@ -90,6 +90,29 @@ through instead of rejecting them.
 
 ## Production Deployment tasks (require Linux/cloud host)
 
+- **CRITICAL: connect to Postgres as a non-superuser, non-`BYPASSRLS`
+  role, or row-level security provides zero protection.** Discovered in
+  Phase 6: Postgres superusers bypass RLS unconditionally, regardless of
+  `FORCE ROW LEVEL SECURITY` -- this is documented Postgres behavior,
+  not a bug in this project's policies, but it means connecting the
+  application as `postgres` (or any role with `rolsuper`/`rolbypassrls`)
+  silently defeats every tenant-isolation guarantee this project's RLS
+  migrations are supposed to provide. Create a dedicated role before
+  deploying:
+  ```sql
+  CREATE ROLE saeos_app LOGIN PASSWORD '...' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
+  GRANT USAGE ON SCHEMA public TO saeos_app;
+  GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO saeos_app;
+  GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO saeos_app;
+  ```
+  Run this **after** `alembic upgrade head` has created the tables (the
+  grants only apply to tables that already exist when the `GRANT ...
+  ALL TABLES` statement runs); migrations themselves still need a
+  privileged role (superuser or table owner) to run `CREATE POLICY`/
+  `ALTER TABLE ... FORCE ROW LEVEL SECURITY`, so a typical setup runs
+  migrations as one role and points the running application's
+  `DATABASE_URL` at `saeos_app` (or equivalent) instead.
+
 - **Postgres (`asyncpg` driver)**: building the C extension on Termux
   ARM64 is unreliable. Develop against SQLite locally; point at Postgres
   only on the target deployment host, where prebuilt manylinux wheels

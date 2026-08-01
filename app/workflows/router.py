@@ -91,7 +91,8 @@ async def run_workflow(request: Request):
         )
         session.add(run)
         await session.commit()
-        await session.refresh(run)
+        # No refresh(): run.id is a client-side UUID default; the
+        # response below doesn't use created_at.
 
     if run_async:
         # Imported lazily: only touches Celery when async mode is actually

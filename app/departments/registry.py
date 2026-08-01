@@ -6,18 +6,29 @@ required permission). Executive Office keeps its bespoke subclass
 (app/departments/executive_office/agent.py) because it has real custom
 escalation logic; everything else runs through GenericDepartmentAgent,
 which is a complete, working DepartmentAgent -- just driven by data
-instead of a one-off class. This is a deliberate scope choice: the same
-capability-declaration contract every department needs (tools, memory
-boundary via tenant_id, permissions, escalation) is fully present for
-all 26; deep bespoke behavior (like Executive Office's should_escalate)
-gets added per-department as real business logic accumulates, without
-changing this registry's shape.
+instead of a one-off class.
+
+Escalation rules are genuinely differentiated per department (Phase 6),
+not the same two generic conditions copy-pasted 25 times -- see
+DEPARTMENT_ESCALATION_RULES below. They're evaluated by
+DepartmentAgent.should_escalate() (app/departments/base/agent.py) and
+wired into an automatic ApprovalRequest by
+app/api/v1/departments_router.py's invoke handler, which is what turns
+this from a data structure into something that actually protects the
+founder from an AI department unilaterally committing to spend, legal
+terms, or missing a security incident.
 
 Permission codes follow "<department>.act" as the baseline gate; finer-
 grained permissions (e.g. "finance.approve_payment" vs "finance.view_report")
 are a Role/Permission-management concern (Phase 3), not a registry concern.
 """
-from app.departments.base.agent import AgentCapability, DepartmentAgent, EscalationRule, GenericDepartmentAgent
+from app.departments.base.agent import (
+    ALWAYS_ESCALATE,
+    AgentCapability,
+    DepartmentAgent,
+    EscalationRule,
+    GenericDepartmentAgent,
+)
 from app.departments.executive_office.agent import ExecutiveOfficeAgent
 
 # (registry key, department slug used in AI Gateway routing.yaml, display name, mission)
@@ -49,6 +60,111 @@ _DEPARTMENT_DEFINITIONS: list[tuple[str, str, str]] = [
     ("automation", "Automation", "Identify and build automations that reduce manual work across departments."),
 ]
 
+_GENERIC_FINANCIAL_LEGAL = EscalationRule(
+    condition="request or response mentions a financial or legal commitment",
+    trigger_keywords=["payment", "contract", "spend", "budget", "sign", "nda", "invoice"],
+)
+_GENERIC_SECURITY = EscalationRule(
+    condition="request or response mentions a security incident",
+    trigger_keywords=["breach", "incident", "leaked", "unauthorized access", "compromise"],
+)
+_DEFAULT_RULES = [_GENERIC_FINANCIAL_LEGAL, _GENERIC_SECURITY]
+
+# Departments with genuinely differentiated triggers beyond the generic
+# baseline above. Anything not listed here falls back to _DEFAULT_RULES.
+DEPARTMENT_ESCALATION_RULES: dict[str, list[EscalationRule]] = {
+    "human_resources": [
+        EscalationRule(
+            condition="hiring, termination, or compensation action",
+            trigger_keywords=["hire", "fire", "terminate", "layoff", "salary", "offer letter", "severance"],
+        ),
+    ],
+    "engineering": [
+        EscalationRule(
+            condition="production or destructive data operation",
+            trigger_keywords=["production", "deploy", "drop table", "delete database", "migrate data", "force push"],
+        ),
+    ],
+    "devops": [
+        EscalationRule(
+            condition="production infrastructure or paid resource change",
+            trigger_keywords=["provision", "deploy", "production", "delete", "terminate instance", "scale down"],
+        ),
+    ],
+    "cyber_security": [
+        EscalationRule(
+            condition="active security incident indicator",
+            trigger_keywords=["breach", "incident", "vulnerability", "leaked", "unauthorized", "exploit", "compromise"],
+        ),
+    ],
+    "sales": [
+        EscalationRule(
+            condition="pricing or contract term commitment",
+            trigger_keywords=["discount", "contract terms", "pricing exception", "commit to", "sign"],
+        ),
+    ],
+    "finance": [
+        EscalationRule(
+            condition="payment, invoice, or budget commitment",
+            trigger_keywords=["payment", "invoice", "refund", "wire transfer", "budget", "expense", "subscribe", "purchase"],
+        ),
+    ],
+    "legal": [
+        EscalationRule(
+            condition="contract execution or legal exposure",
+            trigger_keywords=["sign", "contract", "nda", "lawsuit", "liability", "terms of service", "legal action"],
+        ),
+    ],
+    "compliance": [
+        EscalationRule(
+            condition="compliance violation or data-handling incident",
+            trigger_keywords=["violation", "breach", "non-compliant", "data leak", "gdpr", "audit finding"],
+        ),
+    ],
+    "internal_audit": [
+        EscalationRule(
+            condition="fraud or policy violation finding",
+            trigger_keywords=["fraud", "violation", "policy breach", "irregularity"],
+        ),
+    ],
+    "procurement": [
+        EscalationRule(
+            condition="new subscription or vendor commitment",
+            trigger_keywords=["subscribe", "purchase", "vendor contract", "recurring payment", "sign"],
+        ),
+    ],
+    "public_relations": [
+        EscalationRule(
+            condition="external public statement",
+            trigger_keywords=["press release", "statement", "publish", "respond to media", "crisis"],
+        ),
+    ],
+    "investor_relations": [
+        EscalationRule(
+            condition="any investor-facing communication (always escalated per department mission)",
+            trigger_keywords=[ALWAYS_ESCALATE],
+        ),
+    ],
+    "automation": [
+        EscalationRule(
+            condition="irreversible or bulk data operation",
+            trigger_keywords=["delete", "production", "irreversible", "bulk update", "mass delete"],
+        ),
+    ],
+    "customer_success": [
+        EscalationRule(
+            condition="refund or account credit",
+            trigger_keywords=["refund", "compensation", "credit", "chargeback"],
+        ),
+    ],
+    "marketing": [
+        EscalationRule(
+            condition="paid campaign or sponsorship spend",
+            trigger_keywords=["spend", "budget", "paid campaign", "sponsorship"],
+        ),
+    ],
+}
+
 CAPABILITIES: dict[str, AgentCapability] = {
     "executive_office": ExecutiveOfficeAgent.capability,
 }
@@ -64,10 +180,7 @@ for _slug, _name, _mission in _DEPARTMENT_DEFINITIONS:
             f"strategic direction to the founder rather than acting on it."
         ),
         tools=[f"read_{_slug}_records"],
-        escalation_rules=[
-            EscalationRule(condition="action involves financial or legal commitment", escalate_to="ceo"),
-            EscalationRule(condition="action involves a security incident", escalate_to="ceo"),
-        ],
+        escalation_rules=DEPARTMENT_ESCALATION_RULES.get(_slug, _DEFAULT_RULES),
         required_permission=f"{_slug}.act",
     )
 
