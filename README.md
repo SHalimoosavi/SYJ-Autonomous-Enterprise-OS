@@ -1,4 +1,4 @@
-# SYJ Autonomous Enterprise OS (SAEOS) — Phase 1 → 6
+# SYJ Autonomous Enterprise OS (SAEOS) — Phase 1 → 7
 
 Multi-tenant, provider-agnostic AI Company Operating System.
 
@@ -9,13 +9,15 @@ Multi-tenant, provider-agnostic AI Company Operating System.
 - **Phase 4**: async (Celery) workflow execution, OpenAI/Voyage embedding providers, pgvector, dashboard widgets (KPIs, sales pipeline, financials).
 - **Phase 5**: Gemini provider, rate limiting (in-memory + Redis), server-rendered permission/role admin UI.
 - **Phase 6**: real escalation logic (wired to the Approval Queue), platform-admin cross-tenant view, CSRF hardening, and a chain of serious RLS bugs found + fixed by finally testing against a genuine non-superuser Postgres role.
+- **Phase 7**: scripted Postgres role provisioning, workflow-level escalation (pause + resume, not just single-invoke), audit-log immutability (Postgres trigger).
 
 **⚠️ If you're deploying to Postgres, read `docs/TERMUX.md`'s
 "Production Deployment tasks" section before going further.** Phase 6
 found that Postgres superusers bypass row-level security
 unconditionally — connecting as `postgres` silently defeats every
-tenant-isolation guarantee this project's RLS migrations provide. A
-dedicated non-superuser role is required, not optional.
+tenant-isolation guarantee this project's RLS migrations provide. Run
+`scripts/provision_postgres_role.py` (Phase 7) to set up the required
+non-superuser role.
 
 Built on **Starlette**, not FastAPI — see `docs/TERMUX.md` for why. No
 Pydantic, no Rust-based dependencies anywhere in the default install.
@@ -37,7 +39,23 @@ pytest -v
 # and live Celery+Redis integration tests, which need real infra (see below).
 ```
 
-## Phase 4 production features (need real infra, not part of Termux dev)
+## Production features (need real infra, not part of Termux dev)
+
+**Required: the non-superuser Postgres role** (Phase 6/7): Postgres
+superusers bypass row-level security unconditionally, so RLS provides
+zero protection unless the application connects as a role without
+`SUPERUSER`/`BYPASSRLS`. Provision it with:
+```bash
+python scripts/provision_postgres_role.py \
+  --admin-url postgresql://postgres:<pw>@<host>:5432/<dbname> \
+  --app-role saeos_app --app-password <a-real-secret>
+```
+Run this **after** `alembic upgrade head` (migrations themselves need a
+privileged role for `CREATE POLICY`/`FORCE ROW LEVEL SECURITY`), then
+point the running application's `DATABASE_URL` at `saeos_app` instead of
+the superuser. Idempotent — safe to re-run after future migrations add
+tables (`ALTER DEFAULT PRIVILEGES` already covers them, but re-running
+is harmless).
 
 **pgvector** (faster similarity search at scale): run Postgres with the
 `vector` extension, set `DATABASE_URL` to it and `VECTOR_STORE_BACKEND=pgvector`
@@ -60,6 +78,14 @@ worker process in this project's own development. To run the test yourself:
 ```bash
 CELERY_LIVE_TEST=true WORKFLOW_ASYNC_ENABLED=true CELERY_BROKER_URL=redis://localhost:6379/1 \
   pytest tests/test_async_workflow_live.py -v
+```
+
+**Audit-log immutability** (Phase 7): a Postgres trigger blocks
+`UPDATE`/`DELETE` on `audit_logs` outright, applied automatically by
+`alembic upgrade head`. To verify it yourself:
+```bash
+AUDIT_IMMUTABILITY_LIVE_TEST=true DATABASE_URL=postgresql+asyncpg://... \
+  pytest tests/test_audit_immutability_live.py -v
 ```
 
 ## Try the full flow
@@ -85,6 +111,18 @@ curl -X POST localhost:8000/api/v1/workflows/release_review/run \
   -H "X-Tenant-ID: acme" -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
   -d '{"input":"Add rate limiting","async":true}'
 # -> {"run_id": "...", "status": "queued"}  -- poll GET /api/v1/workflows/runs/<run_id>
+
+# 3b. A workflow step can also escalate (pauses the run -- see Phase 7)
+curl -X POST localhost:8000/api/v1/workflows/release_review/run \
+  -H "X-Tenant-ID: acme" -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -d '{"input":"Deploy straight to production"}'
+# -> 202 {"status": "escalated", "approval_id": "...", ...}
+curl -X POST localhost:8000/api/v1/approvals/<approval_id>/decide \
+  -H "X-Tenant-ID: acme" -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -d '{"decision":"approved"}'
+curl -X POST localhost:8000/api/v1/workflows/runs/<run_id>/resume \
+  -H "X-Tenant-ID: acme" -H "Authorization: Bearer <token>"
+# -> continues from the next step, not re-running the already-completed ones
 
 # 4. Track a sales deal and record a KPI
 curl -X POST localhost:8000/api/v1/dashboard/pipeline \
@@ -124,7 +162,8 @@ curl localhost:8000/api/v1/platform/stats -H "X-Tenant-ID: acme" -H "Authorizati
 |---|---|
 | AI Gateway (generate + embed) + provider fallback chain | Working, tested |
 | All 26 departments, generic invoke endpoint | Working, tested |
-| Escalation logic (keyword-triggered, auto-creates Approval Queue entries) | Working, tested — see docs/ARCHITECTURE.md §22 for why this was previously dead code |
+| Escalation logic — single invoke (keyword-triggered, auto-creates Approval Queue entries) | Working, tested — see docs/ARCHITECTURE.md §22 for why this was previously dead code |
+| Escalation logic — workflow steps (pauses run, resumable after approval) | Working, tested — see docs/ARCHITECTURE.md §24 |
 | RAG: ingest/query, opt-in retrieval augmentation | Working, tested |
 | pgvector production backend | **Live-verified** against real Postgres+pgvector, as a genuine non-superuser role (see docs/ARCHITECTURE.md §22) |
 | Workflow engine (sync, default) | Working, tested |
@@ -133,6 +172,8 @@ curl localhost:8000/api/v1/platform/stats -H "X-Tenant-ID: acme" -H "Authorizati
 | Permission management: roles, catalog, assignment | Working, tested |
 | Permission/role admin UI (HTML, cookie-session, CSRF-protected) | Working, tested — including a simulated cross-session CSRF attack |
 | Platform-admin cross-tenant view | **Live-verified** against genuine (non-superuser) Postgres RLS enforcement (see docs/ARCHITECTURE.md §22) |
+| Postgres role provisioning script | **Live-verified** (idempotency, grant application, future-table coverage — see docs/ARCHITECTURE.md §24) |
+| Audit-log immutability (Postgres trigger) | **Live-verified**: INSERT works, UPDATE/DELETE genuinely blocked (see docs/ARCHITECTURE.md §24) |
 | Dashboard: KPIs, sales pipeline, financial summary | Working, tested |
 | Tenant middleware, auth, RBAC, audit logging, Approval Queue | Working, tested |
 | Postgres row-level security | **Live-verified against a genuine non-superuser role in Phase 6** — a chain of real bugs (including that superusers bypass RLS entirely) meant this was never actually proven before, despite passing tests in earlier phases. See docs/ARCHITECTURE.md §22 for the full account. |

@@ -651,13 +651,107 @@ infra) on SQLite, plus every RLS-dependent live test re-verified against
 a genuine non-superuser Postgres role, not the superuser connection
 every earlier phase unknowingly relied on.
 
-## 23. Next (Phase 7 preview)
+## 24. Phase 7 — role provisioning script, workflow-level escalation, audit-log immutability (complete)
 
-A documented, scripted way to provision the `saeos_app`-equivalent
-non-superuser role and grants as part of the standard Postgres
-deployment process (currently a manual `GRANT` sequence run ad hoc
-during this phase's testing, not yet codified anywhere a real deployment
-would run it), Gemini's `should_escalate` equivalent for workflow-level
-(not just single-invoke) escalation, and audit-log immutability
-(currently a plain table with no `UPDATE`/`DELETE` revocation at the DB
-level, noted as a gap back in Phase 1's security review and still open).
+Picks up the three items Phase 6 explicitly deferred, in the same order.
+
+### Postgres role provisioning script
+
+`scripts/provision_postgres_role.py` -- scripts the manual `psql`
+sequence Phase 6 ran by hand: `CREATE ROLE ... NOSUPERUSER NOBYPASSRLS`,
+grants on all current tables, and `ALTER DEFAULT PRIVILEGES` so tables
+created by *future* migrations are covered without re-running anything.
+Idempotent (safe to re-run; detects an existing role and just re-applies
+grants). Deliberately shells out to `psql` rather than adding a Python
+Postgres driver dependency to this script -- it's a human-run,
+occasional operator tool, not application runtime code, so the
+Termux-first dependency discipline doesn't really apply to it, but
+there was no reason to add a dependency it doesn't need either.
+
+**Live-verified**, not just written: ran against the accumulated
+Phase 1-7 schema, confirmed idempotent (two consecutive runs, second
+one a clean no-op on `CREATE ROLE`), confirmed the granted role can
+actually `SELECT` through RLS, and confirmed `ALTER DEFAULT PRIVILEGES`
+genuinely covers a table created *after* provisioning ran (created a
+throwaway table as superuser post-provisioning, confirmed `saeos_app`
+had full grants on it with zero manual re-grant). Also fixed a real
+robustness gap found while testing it against a database that happened
+to be down mid-test: `role_exists()` originally treated a connection
+failure the same as "role doesn't exist" and would have proceeded to a
+much more confusing `CREATE ROLE` failure instead of a clear connection
+error.
+
+### Workflow-level escalation
+
+Phase 6 wired `should_escalate()` into single department-invoke calls
+only. `app/workflows/executor.py` now checks it after every step too --
+a match creates a real `ApprovalRequest` (via the same
+`app/approvals/service.py` Phase 6 already uses) and sets the run to a
+new `RunStatus.ESCALATED`, then **stops** rather than continuing to
+later steps. That's a deliberate difference from single-invoke's
+"flag and return" behavior: a workflow chains each step's output into
+the next step's prompt via `{previous}`, so letting execution continue
+past an unapproved escalated step would mean further AI-generated
+content builds on something that hasn't had founder sign-off --
+defeating the point of escalating at all. `POST
+/api/v1/workflows/runs/{id}/resume` continues from the next
+not-yet-run step once the linked approval is `approved` (409 otherwise,
+whether pending or rejected), by reading how many `WorkflowStepRun` rows
+already exist rather than re-executing anything.
+
+**A real design bug caught by its own test suite, not a hypothetical**:
+the escalation check initially evaluated prompt+response together (the
+same pattern single-invoke correctly uses), but a workflow step's prompt
+is generated from a fixed `prompt_template`, not user-authored free
+text. Several templates ask a department directly about its own
+risk-relevant function -- e.g. DevOps: *"what deployment steps..."* --
+which contains trigger keywords like "deploy" completely regardless of
+what the AI actually said, so the DevOps step of `release_review`
+escalated on *every* run, including the "should complete normally" happy
+path test. Fixed by checking only the response text for workflow-step
+escalation (prompt+response remains correct for single-invoke, where the
+prompt is genuinely user intent) -- a real, principled distinction
+between the two call sites, not an inconsistency.
+
+### Audit-log immutability
+
+A gap noted since Phase 1's own security review ("nothing here yet
+enforces immutability at the DB level"). New migration adds a Postgres
+`BEFORE UPDATE OR DELETE` trigger on `audit_logs` that unconditionally
+raises. Chosen over `REVOKE UPDATE, DELETE FROM <role>`: a trigger is
+role-independent (doesn't need to hardcode the application's role name,
+and can't be bypassed by connecting as a different one), at the cost of
+even the table owner losing UPDATE/DELETE through normal SQL -- a
+deliberate tradeoff for this project's append-only audit trail; a
+genuine future retention-purge job would need to explicitly drop and
+recreate the trigger around itself, a visible two-step operation rather
+than a capability every connection has silently by default.
+
+**Live-verified** against the genuine non-superuser `saeos_app` role
+from Phase 6 (not the superuser -- the whole lesson of that phase):
+normal `INSERT` succeeds, both `UPDATE` and `DELETE` are rejected with
+the trigger's own error message, and the row is confirmed unmodified
+afterward. Also confirmed no application code path anywhere ever
+attempts to update or delete an `AuditLog` row (only `INSERT`/`SELECT`
+appear in `app/`), so this migration has zero functional impact on
+existing behavior -- pure hardening.
+
+Full verification for this phase: fresh venv, zero native compilation
+(unchanged), all 12 migrations clean on SQLite, 128 tests passing (7
+correctly skipping without live infra) -- plus every new
+Postgres-dependent piece (the provisioning script itself, workflow
+escalation's approval-creation path, and audit immutability) verified
+against the real, non-superuser `saeos_app` role established in Phase 6,
+not the superuser connection that would have silently hidden problems
+the way it did for three phases before that lesson was learned.
+
+## 25. Next (Phase 8 preview)
+
+A documented retention-purge procedure for `audit_logs` that correctly
+handles the immutability trigger (drop/purge/recreate), workflow
+`resume` permission scoping (currently any tenant user who can see a
+run can resume it once approved, relying entirely on the prior owner
+approval as the safety gate -- worth revisiting once role-based
+per-department permissions from Phase 3 see more real use), and a
+`GET /api/v1/platform/tenants/{id}/audit-log` cross-tenant audit view to
+round out the Phase 6 platform-admin surface.

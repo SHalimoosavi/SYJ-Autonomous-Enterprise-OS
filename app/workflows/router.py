@@ -103,7 +103,7 @@ async def run_workflow(request: Request):
         return JSONResponse({"run_id": run.id, "status": "queued"}, status_code=202)
 
     result = await execute_workflow_run(run.id, user.tenant_id, user.id, slug, input_prompt)
-    status_code = 200 if result["status"] == "completed" else 503
+    status_code = {"completed": 200, "escalated": 202}.get(result["status"], 503)
     return JSONResponse({"run_id": run.id, **result}, status_code=status_code)
 
 
@@ -139,16 +139,83 @@ async def get_run(request: Request):
             "workflow_slug": run.workflow_slug,
             "status": run.status.value,
             "error": run.error,
+            "pending_approval_id": run.pending_approval_id,
             "steps": [
-                {"department": s.department, "status": s.status.value, "output": s.output_text, "error": s.error}
+                {
+                    "department": s.department, "status": s.status.value, "output": s.output_text,
+                    "error": s.error, "escalated": s.escalated, "escalation_reason": s.escalation_reason,
+                }
                 for s in steps
             ],
         }
     )
 
 
+async def resume_workflow(request: Request):
+    from sqlalchemy import select
+    from app.approvals.models import ApprovalRequest, ApprovalStatus
+    from app.workflows.executor import run_workflow_from_step
+    from app.workflows.models import WorkflowStepRun
+
+    run_id = request.path_params["run_id"]
+    try:
+        user = await get_current_user(request)
+    except Unauthorized as exc:
+        return JSONResponse({"detail": str(exc)}, status_code=401)
+
+    async with AsyncSessionLocal() as session:
+        await set_tenant_context(session, user.tenant_id)
+        run = (
+            await session.execute(
+                select(WorkflowRun).where(WorkflowRun.id == run_id, WorkflowRun.tenant_id == user.tenant_id)
+            )
+        ).scalar_one_or_none()
+        if run is None:
+            return JSONResponse({"detail": "Workflow run not found"}, status_code=404)
+        if run.status != RunStatus.ESCALATED:
+            return JSONResponse(
+                {"detail": f"Workflow run is not awaiting approval (status: {run.status.value})"}, status_code=409
+            )
+
+        approval = (
+            await session.execute(select(ApprovalRequest).where(ApprovalRequest.id == run.pending_approval_id))
+        ).scalar_one_or_none()
+        if approval is None or approval.status != ApprovalStatus.APPROVED:
+            current = approval.status.value if approval else "unknown"
+            return JSONResponse(
+                {"detail": f"Cannot resume: the linked approval is not approved yet (status: {current})"},
+                status_code=409,
+            )
+
+        completed_steps = (
+            await session.execute(
+                select(WorkflowStepRun).where(WorkflowStepRun.run_id == run.id).order_by(WorkflowStepRun.step_index)
+            )
+        ).scalars().all()
+        next_index = len(completed_steps)  # every prior step (including the escalated one) is already recorded
+        previous_output = completed_steps[-1].output_text if completed_steps else ""
+
+    if (rate_limited := await enforce_rate_limit(user.tenant_id, user.id, "workflow_run")) is not None:
+        return rate_limited
+
+    async with AsyncSessionLocal() as session:
+        await set_tenant_context(session, user.tenant_id)
+        run = (await session.execute(select(WorkflowRun).where(WorkflowRun.id == run_id))).scalar_one()
+        run.status = RunStatus.RUNNING
+        session.add(run)
+        await session.commit()
+
+    result = await run_workflow_from_step(
+        run.id, user.tenant_id, user.id, run.workflow_slug, run.input_prompt,
+        start_index=next_index, previous_output=previous_output or "",
+    )
+    status_code = {"completed": 200, "escalated": 202}.get(result["status"], 503)
+    return JSONResponse({"run_id": run.id, **result}, status_code=status_code)
+
+
 routes = [
     Route("/api/v1/workflows", list_workflows_route),
     Route("/api/v1/workflows/{workflow_slug}/run", run_workflow, methods=["POST"]),
     Route("/api/v1/workflows/runs/{run_id}", get_run),
+    Route("/api/v1/workflows/runs/{run_id}/resume", resume_workflow, methods=["POST"]),
 ]
