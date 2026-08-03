@@ -220,3 +220,77 @@ def test_escalation_audit_logged_for_workflow(monkeypatch):
             return result.scalar_one_or_none()
 
     assert asyncio.run(_check()) is not None
+
+
+# --- Phase 8: resume permission scoping ---
+
+def _make_staff(tenant_id, tenant_slug, email):
+    from app.auth.models import User
+    from app.core.database import AsyncSessionLocal
+    from app.core.security import create_access_token, hash_password
+
+    async def _make():
+        async with AsyncSessionLocal() as session:
+            user = User(tenant_id=tenant_id, email=email, hashed_password=hash_password("staffpassword1"),
+                        is_platform_admin=False, is_tenant_owner=False)
+            session.add(user)
+            await session.commit()
+            await session.refresh(user)
+            return user
+
+    user = asyncio.run(_make())
+    return user, create_access_token(subject=user.id, tenant_id=tenant_id)
+
+
+def test_resume_denied_for_staff_missing_permission_on_a_later_step(monkeypatch):
+    """The owner-approval gate on the escalated step is necessary but not
+    sufficient: a staff user with permission for the escalated step's
+    department (engineering) but NOT for a later step's department
+    (quality_assurance, devops) must still be denied resume."""
+    _wire_scripted_provider(monkeypatch, ["Deploy to production now.", "should never run", "should never run"])
+    reg = _register("we10")
+    tenant_id = reg.json()["tenant_id"]
+    owner_token = reg.json()["access_token"]
+    owner_headers = _headers("we10", owner_token)
+
+    started = client.post("/api/v1/workflows/release_review/run", headers=owner_headers, json={"input": "Ship it"})
+    run_id = started.json()["run_id"]
+    approval_id = started.json()["approval_id"]
+    client.post(f"/api/v1/approvals/{approval_id}/decide", headers=owner_headers, json={"decision": "approved"})
+
+    # Staff user with ONLY engineering.act -- the escalated step's
+    # department, but none of the remaining steps' departments.
+    staff, staff_token = _make_staff(tenant_id, "we10", "staff@we10.test")
+    role_id = client.post("/api/v1/roles", headers=owner_headers, json={"name": "Engineer"}).json()["id"]
+    client.post(f"/api/v1/roles/{role_id}/permissions", headers=owner_headers, json={"permission_code": "engineering.act"})
+    client.post(f"/api/v1/users/{staff.id}/roles", headers=owner_headers, json={"role_id": role_id})
+
+    resume = client.post(f"/api/v1/workflows/runs/{run_id}/resume", headers=_headers("we10", staff_token))
+    assert resume.status_code == 403
+    assert "quality_assurance" in resume.json()["detail"]
+
+
+def test_resume_allowed_for_staff_with_all_remaining_permissions(monkeypatch):
+    provider = _wire_scripted_provider(
+        monkeypatch, ["Deploy to production now.", "QA confirms tests pass.", "DevOps rollback plan ready."]
+    )
+    reg = _register("we11")
+    tenant_id = reg.json()["tenant_id"]
+    owner_token = reg.json()["access_token"]
+    owner_headers = _headers("we11", owner_token)
+
+    started = client.post("/api/v1/workflows/release_review/run", headers=owner_headers, json={"input": "Ship it"})
+    run_id = started.json()["run_id"]
+    approval_id = started.json()["approval_id"]
+    client.post(f"/api/v1/approvals/{approval_id}/decide", headers=owner_headers, json={"decision": "approved"})
+
+    staff, staff_token = _make_staff(tenant_id, "we11", "staff@we11.test")
+    role_id = client.post("/api/v1/roles", headers=owner_headers, json={"name": "ReleaseManager"}).json()["id"]
+    for code in ("quality_assurance.act", "devops.act"):
+        client.post(f"/api/v1/roles/{role_id}/permissions", headers=owner_headers, json={"permission_code": code})
+    client.post(f"/api/v1/users/{staff.id}/roles", headers=owner_headers, json={"role_id": role_id})
+
+    resume = client.post(f"/api/v1/workflows/runs/{run_id}/resume", headers=_headers("we11", staff_token))
+    assert resume.status_code == 200
+    assert resume.json()["status"] == "completed"
+    assert provider.call_count == 3

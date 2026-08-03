@@ -1,4 +1,4 @@
-# SYJ Autonomous Enterprise OS (SAEOS) — Phase 1 → 7
+# SYJ Autonomous Enterprise OS (SAEOS) — Phase 1 → 8
 
 Multi-tenant, provider-agnostic AI Company Operating System.
 
@@ -10,6 +10,7 @@ Multi-tenant, provider-agnostic AI Company Operating System.
 - **Phase 5**: Gemini provider, rate limiting (in-memory + Redis), server-rendered permission/role admin UI.
 - **Phase 6**: real escalation logic (wired to the Approval Queue), platform-admin cross-tenant view, CSRF hardening, and a chain of serious RLS bugs found + fixed by finally testing against a genuine non-superuser Postgres role.
 - **Phase 7**: scripted Postgres role provisioning, workflow-level escalation (pause + resume, not just single-invoke), audit-log immutability (Postgres trigger).
+- **Phase 8**: audit-log retention purge script, workflow-resume permission scoping, platform-admin cross-tenant audit-log view.
 
 **⚠️ If you're deploying to Postgres, read `docs/TERMUX.md`'s
 "Production Deployment tasks" section before going further.** Phase 6
@@ -88,6 +89,25 @@ AUDIT_IMMUTABILITY_LIVE_TEST=true DATABASE_URL=postgresql+asyncpg://... \
   pytest tests/test_audit_immutability_live.py -v
 ```
 
+**Audit-log retention purge** (Phase 8): the immutability trigger above
+means `DELETE`s are blocked by default, so old rows need this script
+instead of raw SQL — it drops the trigger, deletes, and restores the
+trigger inside one transaction, and records the purge itself as new
+audit rows:
+```bash
+python scripts/purge_audit_logs.py --admin-url postgresql://postgres:<pw>@<host>:5432/<db> \
+  --older-than-days 730 --dry-run     # see what would be deleted first
+python scripts/purge_audit_logs.py --admin-url postgresql://postgres:<pw>@<host>:5432/<db> \
+  --older-than-days 730 --confirm     # then actually delete
+```
+Requires a privileged (table-owner or superuser) connection — `DROP
+TRIGGER`/`CREATE TRIGGER` are DDL the runtime `saeos_app` role isn't
+granted. To run the live test yourself:
+```bash
+AUDIT_PURGE_LIVE_TEST=true PURGE_TEST_ADMIN_URL=postgresql://postgres:<pw>@<host>:5432/<db> \
+  pytest tests/test_audit_purge_live.py -v
+```
+
 ## Try the full flow
 
 ```bash
@@ -154,6 +174,9 @@ curl -X POST localhost:8000/api/v1/departments/engineering/invoke \
 #    no API to self-grant this)
 curl localhost:8000/api/v1/platform/tenants -H "X-Tenant-ID: acme" -H "Authorization: Bearer <token>"
 curl localhost:8000/api/v1/platform/stats -H "X-Tenant-ID: acme" -H "Authorization: Bearer <token>"
+curl "localhost:8000/api/v1/platform/audit-log?limit=50" -H "X-Tenant-ID: acme" -H "Authorization: Bearer <token>"
+curl "localhost:8000/api/v1/platform/tenants/<tenant_id>/audit-log?action=approval.created" \
+  -H "X-Tenant-ID: acme" -H "Authorization: Bearer <token>"
 ```
 
 ## What's real vs. stubbed
@@ -172,8 +195,11 @@ curl localhost:8000/api/v1/platform/stats -H "X-Tenant-ID: acme" -H "Authorizati
 | Permission management: roles, catalog, assignment | Working, tested |
 | Permission/role admin UI (HTML, cookie-session, CSRF-protected) | Working, tested — including a simulated cross-session CSRF attack |
 | Platform-admin cross-tenant view | **Live-verified** against genuine (non-superuser) Postgres RLS enforcement (see docs/ARCHITECTURE.md §22) |
+| Platform-admin cross-tenant audit-log view (tenant-scoped + global) | **Live-verified** against genuine (non-superuser) Postgres RLS, including a negative control (see docs/ARCHITECTURE.md §26) |
 | Postgres role provisioning script | **Live-verified** (idempotency, grant application, future-table coverage — see docs/ARCHITECTURE.md §24) |
 | Audit-log immutability (Postgres trigger) | **Live-verified**: INSERT works, UPDATE/DELETE genuinely blocked (see docs/ARCHITECTURE.md §24) |
+| Audit-log retention purge script | **Live-verified** — caught and fixed a real JSON-column type-cast bug on first attempt (see docs/ARCHITECTURE.md §26) |
+| Workflow-resume permission scoping | Working, tested — a staff user missing permission for a remaining step is denied even after the escalation itself was approved (see docs/ARCHITECTURE.md §26) |
 | Dashboard: KPIs, sales pipeline, financial summary | Working, tested |
 | Tenant middleware, auth, RBAC, audit logging, Approval Queue | Working, tested |
 | Postgres row-level security | **Live-verified against a genuine non-superuser role in Phase 6** — a chain of real bugs (including that superusers bypass RLS entirely) meant this was never actually proven before, despite passing tests in earlier phases. See docs/ARCHITECTURE.md §22 for the full account. |

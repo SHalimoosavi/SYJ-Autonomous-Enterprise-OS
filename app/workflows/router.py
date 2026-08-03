@@ -195,6 +195,30 @@ async def resume_workflow(request: Request):
         next_index = len(completed_steps)  # every prior step (including the escalated one) is already recorded
         previous_output = completed_steps[-1].output_text if completed_steps else ""
 
+    # Permission check for every REMAINING step's department, matching
+    # run_workflow()'s upfront check for a fresh run. A real gap until
+    # now: the owner-approval gate on the escalation itself is necessary
+    # but not sufficient -- it establishes the *action* is approved, not
+    # that *this particular caller* is permitted to invoke the remaining
+    # departments. Without this, any authenticated tenant user could
+    # resume a run touching departments they have no permission for,
+    # simply because someone else approved the escalated step.
+    workflow = get_workflow(run.workflow_slug)
+    if workflow is None:
+        return JSONResponse({"detail": f"Unknown workflow: {run.workflow_slug}"}, status_code=500)
+    gateway = get_gateway()
+    for step in workflow.steps[next_index:]:
+        agent = get_agent(step.department, gateway)
+        if agent is None:
+            return JSONResponse({"detail": f"Workflow references unknown department: {step.department}"}, status_code=500)
+        try:
+            require_permission(user, agent.capability.required_permission)
+        except PermissionDenied as exc:
+            return JSONResponse(
+                {"detail": f"Missing permission for remaining step '{step.department}': {exc.permission_code}"},
+                status_code=403,
+            )
+
     if (rate_limited := await enforce_rate_limit(user.tenant_id, user.id, "workflow_run")) is not None:
         return rate_limited
 

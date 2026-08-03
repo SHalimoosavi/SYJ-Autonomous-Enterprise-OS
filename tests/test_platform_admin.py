@@ -132,3 +132,119 @@ def test_non_admin_cannot_see_platform_stats():
 def test_platform_admin_endpoints_require_auth():
     resp = client.get("/api/v1/platform/tenants", headers={"X-Tenant-ID": "pt1"})
     assert resp.status_code == 401
+
+
+# --- Phase 8: cross-tenant audit-log view ---
+
+def test_non_admin_cannot_see_tenant_audit_log():
+    reg = _register("pt8")
+    tenant_id = reg.json()["tenant_id"]
+    token = reg.json()["access_token"]
+    resp = client.get(f"/api/v1/platform/tenants/{tenant_id}/audit-log", headers=_headers("pt8", token))
+    assert resp.status_code == 403
+
+
+def test_tenant_audit_log_returns_only_that_tenants_entries():
+    admin_reg = _register("pt-admin5")
+    _make_platform_admin(admin_reg.json()["user_id"])
+    admin_token = admin_reg.json()["access_token"]
+
+    reg_a = _register("pt9")
+    token_a = reg_a.json()["access_token"]
+    tenant_a_id = reg_a.json()["tenant_id"]
+    client.post("/api/v1/approvals", headers=_headers("pt9", token_a), json={"title": "Tenant A approval"})
+
+    reg_b = _register("pt10")
+    token_b = reg_b.json()["access_token"]
+    client.post("/api/v1/approvals", headers=_headers("pt10", token_b), json={"title": "Tenant B approval"})
+
+    resp = client.get(f"/api/v1/platform/tenants/{tenant_a_id}/audit-log", headers=_headers("pt-admin5", admin_token))
+    assert resp.status_code == 200
+    entries = resp.json()["entries"]
+    assert len(entries) > 0
+    assert all(e["tenant_id"] == tenant_a_id for e in entries)
+    assert any(e["action"] == "approval.created" for e in entries)
+
+
+def test_tenant_audit_log_404_for_unknown_tenant():
+    admin_reg = _register("pt-admin6")
+    _make_platform_admin(admin_reg.json()["user_id"])
+    admin_token = admin_reg.json()["access_token"]
+
+    resp = client.get(
+        "/api/v1/platform/tenants/00000000-0000-0000-0000-000000000000/audit-log",
+        headers=_headers("pt-admin6", admin_token),
+    )
+    assert resp.status_code == 404
+
+
+def test_tenant_audit_log_filters_by_action():
+    admin_reg = _register("pt-admin7")
+    _make_platform_admin(admin_reg.json()["user_id"])
+    admin_token = admin_reg.json()["access_token"]
+
+    reg = _register("pt11")
+    token = reg.json()["access_token"]
+    tenant_id = reg.json()["tenant_id"]
+    client.post("/api/v1/approvals", headers=_headers("pt11", token), json={"title": "x"})
+
+    resp = client.get(
+        f"/api/v1/platform/tenants/{tenant_id}/audit-log?action=approval.created",
+        headers=_headers("pt-admin7", admin_token),
+    )
+    assert resp.status_code == 200
+    entries = resp.json()["entries"]
+    assert len(entries) > 0
+    assert all(e["action"] == "approval.created" for e in entries)
+
+    resp_none = client.get(
+        f"/api/v1/platform/tenants/{tenant_id}/audit-log?action=nonexistent.action",
+        headers=_headers("pt-admin7", admin_token),
+    )
+    assert resp_none.json()["entries"] == []
+
+
+def test_global_audit_log_spans_multiple_tenants():
+    admin_reg = _register("pt-admin8")
+    _make_platform_admin(admin_reg.json()["user_id"])
+    admin_token = admin_reg.json()["access_token"]
+
+    reg_a = _register("pt12")
+    token_a = reg_a.json()["access_token"]
+    client.post("/api/v1/approvals", headers=_headers("pt12", token_a), json={"title": "From tenant pt12"})
+
+    reg_b = _register("pt13")
+    token_b = reg_b.json()["access_token"]
+    client.post("/api/v1/approvals", headers=_headers("pt13", token_b), json={"title": "From tenant pt13"})
+
+    resp = client.get("/api/v1/platform/audit-log", headers=_headers("pt-admin8", admin_token))
+    assert resp.status_code == 200
+    tenant_ids_seen = {e["tenant_id"] for e in resp.json()["entries"]}
+    assert reg_a.json()["tenant_id"] in tenant_ids_seen
+    assert reg_b.json()["tenant_id"] in tenant_ids_seen
+
+
+def test_non_admin_cannot_see_global_audit_log():
+    reg = _register("pt14")
+    token = reg.json()["access_token"]
+    resp = client.get("/api/v1/platform/audit-log", headers=_headers("pt14", token))
+    assert resp.status_code == 403
+
+
+def test_audit_log_limit_is_validated():
+    admin_reg = _register("pt-admin9")
+    _make_platform_admin(admin_reg.json()["user_id"])
+    admin_token = admin_reg.json()["access_token"]
+    headers = _headers("pt-admin9", admin_token)
+
+    too_big = client.get("/api/v1/platform/audit-log?limit=99999", headers=headers)
+    assert too_big.status_code == 400
+
+    not_a_number = client.get("/api/v1/platform/audit-log?limit=abc", headers=headers)
+    assert not_a_number.status_code == 400
+
+    zero = client.get("/api/v1/platform/audit-log?limit=0", headers=headers)
+    assert zero.status_code == 400
+
+    valid = client.get("/api/v1/platform/audit-log?limit=5", headers=headers)
+    assert valid.status_code == 200

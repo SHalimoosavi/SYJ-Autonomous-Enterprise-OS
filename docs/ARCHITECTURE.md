@@ -745,13 +745,89 @@ against the real, non-superuser `saeos_app` role established in Phase 6,
 not the superuser connection that would have silently hidden problems
 the way it did for three phases before that lesson was learned.
 
-## 25. Next (Phase 8 preview)
+## 26. Phase 8 — retention purge, resume permission scoping, cross-tenant audit view (complete)
 
-A documented retention-purge procedure for `audit_logs` that correctly
-handles the immutability trigger (drop/purge/recreate), workflow
-`resume` permission scoping (currently any tenant user who can see a
-run can resume it once approved, relying entirely on the prior owner
-approval as the safety gate -- worth revisiting once role-based
-per-department permissions from Phase 3 see more real use), and a
-`GET /api/v1/platform/tenants/{id}/audit-log` cross-tenant audit view to
-round out the Phase 6 platform-admin surface.
+Picks up the three items Phase 7 explicitly deferred.
+
+### Audit-log retention purge
+
+`scripts/purge_audit_logs.py` -- the deliberate, visible two-step
+operation Phase 7's immutability trigger migration promised: drop the
+trigger, delete rows older than a threshold, recreate the trigger, all
+inside a single transaction so a failure partway through leaves the
+trigger fully intact rather than silently disabled. `--dry-run` and
+`--confirm` are mutually exclusive on purpose (a copied dry-run command
+can't accidentally become destructive by typo). The purge itself is
+recorded as two new `audit_logs` rows (`audit.purge_initiated` /
+`audit.purge_completed`, with the actual deleted-row count) -- plain
+`INSERT`s, which the trigger never blocked -- so removing old history is
+itself part of the (new) history.
+
+**Live-verified**, and it genuinely caught a real bug on the first
+attempt, not a clean pass: `metadata_json` is a Postgres `json` column,
+and the script's `jsonb_build_object(...)::text` cast produced a `text`
+value Postgres wouldn't implicitly assign to it -- `ERROR: column
+"metadata_json" is of type json but expression is of type text`. The
+transaction rolled back cleanly (confirmed the trigger was still present
+immediately after the failed attempt, exactly the safety property the
+single-transaction design exists for), fixed the cast to `::json`, and
+the retry succeeded: 4 seeded rows (2 at 800/750 days old, 2 recent) went
+in, the dry run correctly reported "2 would be deleted" without touching
+anything, the confirmed run deleted exactly those 2, the completion
+record's `rows_deleted` matched, and the trigger was confirmed still
+blocking mutation immediately afterward.
+
+### Workflow-resume permission scoping
+
+Phase 7's `resume` endpoint required the linked approval to be
+`approved`, but not that the *resuming caller* held permission for the
+*remaining* steps' departments -- the owner-approval gate established
+the action was approved, not that this particular caller was allowed to
+invoke what's left. Fixed by adding the same upfront
+department-permission check `run_workflow()` already does for a fresh
+run, scoped to `workflow.steps[next_index:]` (only the not-yet-executed
+steps -- already-completed ones, including the escalated one, don't need
+re-checking). Tested both directions: a staff user with only the
+escalated step's department permission is correctly denied (403, naming
+the specific missing department), and a staff user granted permission
+for every remaining department can resume and complete the run.
+
+### Platform-admin cross-tenant audit-log view
+
+Rounds out Phase 6's platform-admin surface with the missing piece:
+`GET /api/v1/platform/tenants/{id}/audit-log` (one tenant, action-filterable)
+and `GET /api/v1/platform/audit-log` (global feed across every tenant,
+for scanning the whole system for anomalies rather than investigating an
+already-known tenant). Both platform-admin-only, both use
+`set_platform_admin_context()` from Phase 6, both cap `limit` at 500 with
+input validation (non-integer or out-of-range values get a 400, not a
+500 or a silently-huge query). **Live-verified** against genuine
+(non-superuser) Postgres RLS: seeded a real audit event in two separate
+tenants via actual API calls, confirmed the tenant-scoped view only
+returns its own tenant's rows, confirmed the global view genuinely spans
+both (the actual thing the platform-admin RLS bypass exists to make
+possible), and confirmed a non-admin user in one of those tenants is
+still denied the endpoint entirely -- the same negative-control
+discipline every RLS-adjacent live test in this project has used since
+the Phase 6 bug chain made it clear that discipline is what actually
+catches problems, not just testing the happy path.
+
+Full verification for this phase: fresh venv, zero native compilation
+(unchanged), all 12 migrations clean on SQLite, 137 tests passing (11
+correctly skipping without live infra) -- plus every Postgres-dependent
+piece (the purge script, the workflow-resume permission check's approval
+path, the cross-tenant audit view) verified against the real,
+non-superuser `saeos_app` role, consistent with the standard set in
+Phase 6.
+
+## 27. Next (Phase 9 preview)
+
+A scheduled/cron-friendly wrapper around `purge_audit_logs.py` (currently
+a manually-invoked script, not yet wired to any recurring job runner),
+resume permission scoping's natural extension to the async/Celery
+workflow path (currently only the synchronous resume endpoint got the
+Phase 8 permission check -- the Celery task itself doesn't call resume
+today, so this isn't a live gap yet, but would need the same treatment
+if resume ever gains an async mode), and surfacing the platform-admin
+audit-log views in the Phase 5 admin UI (currently JSON-API-only, no
+HTML page).
